@@ -5,8 +5,7 @@ echo ============================================
 
 REM Configuration - UPDATE THESE VALUES AS NEEDED
 set BUCKET_NAME=hoda2-ibd-sample-cases-us-west-2
-set SYNC_DIRECTION=both
-set PYTHON_SCRIPT_PATH=C:\Scripts\create_user_home.py
+set PYTHON_SCRIPT_PATH=C:\Scripts\user_assignment_script.py
 
 REM Get the current username
 set USERNAME=%USERNAME%
@@ -20,82 +19,61 @@ if not exist "%PYTHON_SCRIPT_PATH%" (
     exit /b 1
 )
 
-REM Create user-specific home directory with S3 synchronization
+REM Run user assignment script
 echo.
-echo Creating user workspace with S3 synchronization...
+echo Running user assignment system...
 echo Bucket: %BUCKET_NAME%
-echo Sync direction: %SYNC_DIRECTION%
 echo.
 
-REM Call the Python script with S3 parameters and capture output
-echo Running: python "%PYTHON_SCRIPT_PATH%" "%USERNAME%" "%BUCKET_NAME%" "%SYNC_DIRECTION%"
-python "%PYTHON_SCRIPT_PATH%" "%USERNAME%" "%BUCKET_NAME%" "%SYNC_DIRECTION%" > temp_output.txt 2>&1
+REM Call the user assignment Python script and capture output
+echo Running: python "%PYTHON_SCRIPT_PATH%"
+python "%PYTHON_SCRIPT_PATH%" > temp_output.txt 2>&1
 
 REM Check the exit code
 if %errorlevel% neq 0 (
     echo.
-    echo ERROR: Python script failed with exit code %errorlevel%
+    echo ERROR: User assignment script failed with exit code %errorlevel%
     echo Output from script:
     type temp_output.txt
     echo.
-    echo Press any key to continue with local-only setup...
+    echo Press any key to exit...
     pause > nul
-    
-    REM Fallback to local-only setup
-    echo.
-    echo Attempting local-only setup...
-    python "%PYTHON_SCRIPT_PATH%" "%USERNAME%" > temp_local.txt 2>&1
-    
-    if %errorlevel% neq 0 (
-        echo ERROR: Could not create local user directory
-        type temp_local.txt
-        del /f temp_output.txt temp_local.txt 2>nul
-        pause
-        exit /b 1
-    )
-    
-    REM Extract USER_HOME from local-only output using a loop
-    set USER_HOME=
-    for /f "tokens=*" %%i in (temp_local.txt) do (
-        echo %%i | find "BATCH_USER_HOME=" >nul
-        if !errorlevel! equ 0 (
-            for /f "tokens=2 delims==" %%j in ("%%i") do set USER_HOME=%%j
-        )
-    )
-    del /f temp_local.txt 2>nul
-    
-) else (
-    REM Script succeeded, show output and extract USER_HOME
-    type temp_output.txt
-    
-    REM Extract the home directory path using a loop to find BATCH_USER_HOME line
-    set USER_HOME=
-    for /f "tokens=*" %%i in (temp_output.txt) do (
-        echo %%i | find "BATCH_USER_HOME=" >nul
-        if !errorlevel! equ 0 (
-            for /f "tokens=2 delims==" %%j in ("%%i") do set USER_HOME=%%j
-        )
-    )
-    
-    REM If that didn't work, try extracting from "User home path:" line
-    if not defined USER_HOME (
-        for /f "tokens=*" %%i in (temp_output.txt) do (
-            echo %%i | find "User home path:" >nul
-            if !errorlevel! equ 0 (
-                for /f "tokens=4" %%j in ("%%i") do set USER_HOME=%%j
-            )
-        )
+    del /f temp_output.txt 2>nul
+    exit /b 1
+)
+
+REM Script succeeded, show output and extract assigned user
+type temp_output.txt
+
+REM Extract the assigned user using a simpler method
+set ASSIGNED_USER=
+for /f "tokens=*" %%i in (temp_output.txt) do (
+    set "line=%%i"
+    if "!line:~0,14!" == "ASSIGNED_USER=" (
+        set "ASSIGNED_USER=!line:~14!"
     )
 )
 
 REM Clean up temporary file
 del /f temp_output.txt 2>nul
 
-REM Verify we got a valid home directory
-if not defined USER_HOME (
-    echo ERROR: Could not determine user home directory
+REM Debug output
+echo DEBUG: Extracted ASSIGNED_USER as: "%ASSIGNED_USER%"
+
+REM Verify we got a valid user assignment
+if not defined ASSIGNED_USER (
+    echo ERROR: Could not determine assigned user
     pause
     exit /b 1
+)
+
+REM Set the user home directory based on assigned user
+set USER_HOME=C:\AppStreamUsers\%ASSIGNED_USER%
+
+REM Create the user home directory if it doesn't exist
+if not exist "%USER_HOME%" (
+    echo Creating user home directory: %USER_HOME%
+    mkdir "%USER_HOME%"
 )
 
 REM Set environment variable for the application
@@ -103,6 +81,7 @@ set USER_HOME_DIR=%USER_HOME%
 
 echo.
 echo ============================================
+echo Assigned user: %ASSIGNED_USER%
 echo User home directory: %USER_HOME%
 echo Environment variable USER_HOME_DIR set to: %USER_HOME_DIR%
 
@@ -153,21 +132,14 @@ echo ============================================
 echo Launching IBD Annotator...
 echo Python: %PYTHON_EXE%
 echo Working directory: %CD%
+echo Assigned User: %ASSIGNED_USER%
 echo.
 
 REM Step 1: Run data preparation
 echo Step 1: Preparing segmentation data...
+echo TRACE: about to run prep_seg_data.py
 "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml
-
-if %errorlevel% neq 0 (
-    echo.
-    echo ERROR: Data preparation failed (prep_seg_data.py)
-    echo Check the prep_seg.yaml file and data paths.
-    echo.
-    goto ERROR_EXIT
-)
-
-echo Data preparation completed successfully.
+echo TRACE: prep finished, continuing to Step 2
 
 REM Step 2: Launch main application
 echo.
@@ -175,32 +147,28 @@ echo Step 2: Starting manual labeling interface...
 echo Python: %PYTHON_EXE%
 echo Working directory: %CD%
 echo USER_HOME_DIR: %USER_HOME_DIR%
-
-REM Set the environment variable explicitly for the Python process
-set "USER_HOME_DIR=%USER_HOME%"
-
-REM Launch with explicit environment and better error handling
-echo Launching: "%PYTHON_EXE%" ibd_manual_labeling_speedup.py
+echo ASSIGNED_USER: %ASSIGNED_USER%
+echo TRACE: launching main app...
 "%PYTHON_EXE%" ibd_manual_labeling_speedup.py
-set PYTHON_EXIT_CODE=%errorlevel%
+set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
+echo TRACE: main app exited with %PYTHON_EXIT_CODE%
 
-echo Python script completed with exit code: %PYTHON_EXIT_CODE%
-
-REM Only treat non-zero exit codes as errors if the script actually failed
-if %PYTHON_EXIT_CODE% gtr 0 (
-    echo.
-    echo ERROR: Main application failed with exit code %PYTHON_EXIT_CODE%
+if not "%PYTHON_EXIT_CODE%"=="0" (
+    echo TRACE: goto ERROR_EXIT from MAIN (saved exit=%PYTHON_EXIT_CODE%)
     goto ERROR_EXIT
 )
 
 echo.
 echo ============================================
 echo IBD Annotator completed successfully!
-echo User data synchronized with S3 bucket: %BUCKET_NAME%
+echo User: %ASSIGNED_USER%
+echo User data available in: %USER_HOME%
+echo S3 bucket: %BUCKET_NAME%
 echo ============================================
 goto END
 
 :ERROR_EXIT
+echo TRACE: ENTERED ERROR_EXIT at %DATE% %TIME%
 echo.
 echo ============================================
 echo An error occurred during execution.
@@ -210,7 +178,9 @@ echo 1. Check AWS credentials are configured
 echo 2. Verify S3 bucket permissions
 echo 3. Ensure all required files are present
 echo 4. Check Python environment setup
+echo 5. Verify user assignment script is working
 echo.
+echo Assigned user: %ASSIGNED_USER%
 echo User home directory: %USER_HOME%
 echo S3 bucket: %BUCKET_NAME%
 echo ============================================
