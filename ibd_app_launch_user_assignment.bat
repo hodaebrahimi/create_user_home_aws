@@ -6,10 +6,19 @@ echo ============================================
 REM Configuration - UPDATE THESE VALUES AS NEEDED
 set BUCKET_NAME=hoda2-ibd-sample-cases-us-west-2
 set PYTHON_SCRIPT_PATH=C:\Scripts\user_assignment_script.py
+set PYTHON_EXE=C:\Users\ImageBuilderAdmin\miniconda3\envs\appstream-deploy\python.exe
 
 REM Get the current username
 set USERNAME=%USERNAME%
 echo Current user: %USERNAME%
+
+REM Verify Python executable exists early
+if not exist "%PYTHON_EXE%" (
+    echo ERROR: Python executable not found at %PYTHON_EXE%
+    echo Please check the Python installation path.
+    pause
+    exit /b 1
+)
 
 REM Check if Python script exists
 if not exist "%PYTHON_SCRIPT_PATH%" (
@@ -19,15 +28,35 @@ if not exist "%PYTHON_SCRIPT_PATH%" (
     exit /b 1
 )
 
+REM For ImageBuilderTest, set a flag to skip S3
+if /i "%USERNAME%"=="ImageBuilderTest" (
+    echo TEST ENVIRONMENT DETECTED - Setting skip S3 flag
+    set "SKIP_S3_OPERATIONS=1"
+) else (
+    set "SKIP_S3_OPERATIONS=0"
+)
+
+echo Stopping any background S3 sync processes...
+taskkill /f /im python.exe 2>nul
+echo Waiting for processes to terminate...
+for /L %%i in (1,1,3) do (
+    echo.
+)
+
 REM Run user assignment script
 echo.
-echo Running user assignment system...
+echo Running hybrid user assignment system...
 echo Bucket: %BUCKET_NAME%
 echo.
 
 REM Call the user assignment Python script and capture output
-echo Running: python "%PYTHON_SCRIPT_PATH%"
+set "AWS_DEFAULT_REGION=us-west-2"
+set "SKIP_S3_OPERATIONS=%SKIP_S3_OPERATIONS%"
+echo Running Python script: %PYTHON_SCRIPT_PATH%
+echo Using Python executable: %PYTHON_EXE%
 python "%PYTHON_SCRIPT_PATH%" > temp_output.txt 2>&1
+
+echo Python script finished with exit code: %errorlevel%
 
 REM Check the exit code
 if %errorlevel% neq 0 (
@@ -43,6 +72,7 @@ if %errorlevel% neq 0 (
 )
 
 REM Script succeeded, show output and extract assigned user
+echo Python script output:
 type temp_output.txt
 
 REM Extract the assigned user using a simpler method
@@ -115,17 +145,6 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM Set Python environment
-set PYTHON_EXE=C:\Users\ImageBuilderAdmin\miniconda3\envs\appstream-deploy\python.exe
-
-REM Verify Python executable exists
-if not exist "%PYTHON_EXE%" (
-    echo ERROR: Python executable not found at %PYTHON_EXE%
-    echo Please check the Python installation path.
-    pause
-    exit /b 1
-)
-
 REM Launch the Python application
 echo.
 echo ============================================
@@ -138,7 +157,21 @@ echo.
 REM Step 1: Run data preparation
 echo Step 1: Preparing segmentation data...
 echo TRACE: about to run prep_seg_data.py
-"%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml
+
+REM Check if we should use local mount (for test users)
+if /i "%USERNAME%"=="ImageBuilderTest" (
+    echo Using local mount for test environment
+    "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml --use-local-mount
+) else (
+    echo Using S3 for production environment  
+    "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml
+)
+
+if %errorlevel% neq 0 (
+    echo ERROR: Data preparation failed
+    goto ERROR_EXIT
+)
+
 echo TRACE: prep finished, continuing to Step 2
 
 REM Step 2: Launch main application
