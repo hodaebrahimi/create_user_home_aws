@@ -55,35 +55,6 @@ def get_current_username():
                'unknown_user')
     return username.lower()
 
-def check_local_user_file():
-    """Check if user.txt exists in the application directory"""
-    user_file = Path("C:/Scripts/ibd_labeling_local_1-main/user.txt")
-    if user_file.exists():
-        try:
-            with open(user_file, 'r') as f:
-                assigned_user = f.read().strip()
-            print(f"[+] Found local user.txt - assigned to: {assigned_user}")
-            return assigned_user
-        except Exception as e:
-            print(f"[!] Error reading user.txt: {e}")
-            return None
-    else:
-        print("[*] No local user.txt found")
-        return None
-
-def save_local_user_file(assigned_user):
-    """Save the assigned user to local user.txt file"""
-    try:
-        user_file = Path("C:/Scripts/ibd_labeling_local_1-main/user.txt")
-        user_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(user_file, 'w') as f:
-            f.write(assigned_user)
-        print(f"[+] Saved user assignment: {assigned_user}")
-        return True
-    except Exception as e:
-        print(f"[X] Error saving user.txt: {e}")
-        return False
 
 def list_user_folders_s3(bucket_name, s3_client):
     """List all user{i} folders in ibd_root/ from S3"""
@@ -164,22 +135,24 @@ def claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
     """Claim a user folder by creating taken_by.txt in S3 and locally"""
     try:
         taken_by_key = f"ibd_root/{user_folder}/taken_by.txt"
-        content = f"{current_username}\nClaimed at: {datetime.now().isoformat()}"
+        # S3 version - only username
+        s3_content = f"{current_username}\nClaimed at: {datetime.now().isoformat()}"
         
         # Upload to S3
         s3_client.put_object(
             Bucket=bucket_name,
             Key=taken_by_key,
-            Body=content,
+            Body=s3_content,
             ContentType='text/plain'
         )
         
         print(f"[+] Successfully claimed {user_folder} for {current_username} in S3")
         
-        # Also save locally
+        # Local version - user folder + username
+        local_content = f"{user_folder}\n{current_username}\nClaimed at: {datetime.now().isoformat()}"
         local_taken_by_file = Path(f"C:/AppStreamUsers/{user_folder}/taken_by.txt")
         local_taken_by_file.parent.mkdir(parents=True, exist_ok=True)
-        local_taken_by_file.write_text(content)
+        local_taken_by_file.write_text(local_content)
         
         print(f"[+] Also saved taken_by.txt locally: {local_taken_by_file}")
         
@@ -192,15 +165,25 @@ def claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
         return False
 
 def claim_user_folder_mount(mount_path, user_folder, current_username):
-    """Claim a user folder by creating taken_by.txt in mount"""
+    """Claim a user folder by creating taken_by.txt in mount and locally"""
     try:
+        # Mount version - only username
         taken_by_file = mount_path / user_folder / "taken_by.txt"
         taken_by_file.parent.mkdir(parents=True, exist_ok=True)
         
-        content = f"{current_username}\nClaimed at: {datetime.now().isoformat()}"
-        taken_by_file.write_text(content)
+        mount_content = f"{current_username}\nClaimed at: {datetime.now().isoformat()}"
+        taken_by_file.write_text(mount_content)
         
         print(f"[+] Successfully claimed {user_folder} for {current_username} in mount")
+        
+        # Local version - user folder + username
+        local_content = f"{user_folder}\n{current_username}\nClaimed at: {datetime.now().isoformat()}"
+        local_taken_by_file = Path(f"C:/AppStreamUsers/{user_folder}/taken_by.txt")
+        local_taken_by_file.parent.mkdir(parents=True, exist_ok=True)
+        local_taken_by_file.write_text(local_content)
+        
+        print(f"[+] Also saved taken_by.txt locally: {local_taken_by_file}")
+        
         return True
     except Exception as e:
         print(f"[X] Error claiming {user_folder} in mount: {e}")
@@ -243,11 +226,12 @@ def sync_s3_to_local(bucket_name, s3_client, assigned_user):
         print(f"[X] Error syncing from S3: {e}")
         return local_dir
 
-def sync_mount_to_local_from_path(source_dir, assigned_user):
+def sync_mount_to_local_from_path(source_dir, assigned_user_folder):
     """Sync specific mount path to local AppStreamUsers directory"""
     import shutil
     
-    local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
+    # Use the assigned_user_folder name directly (e.g., "user1")
+    local_dir = Path(f"C:/AppStreamUsers/{assigned_user_folder}")
     
     try:
         print(f"[*] Syncing mount path to local: {source_dir} -> {local_dir}")
@@ -308,7 +292,7 @@ def sync_mount_to_local(mount_path, assigned_user):
         print(f"[X] Error syncing from mount: {e}")
         return local_dir
 
-def update_prep_seg_yaml(assigned_user):
+def update_prep_seg_yaml(assigned_user_folder):
     """Update prep_seg.yaml file to set output directory to user's folder"""
     yaml_file = Path("C:/Scripts/ibd_labeling_local_1-main/prep_seg.yaml")
     
@@ -320,7 +304,8 @@ def update_prep_seg_yaml(assigned_user):
         with open(yaml_file, 'r') as f:
             yaml_data = yaml.safe_load(f)
         
-        new_output_dir = f"C:/AppStreamUsers/{assigned_user}"
+        # Use the assigned_user_folder (e.g., "user1") directly
+        new_output_dir = f"C:/AppStreamUsers/{assigned_user_folder}"
         
         # Remove existing output directory entries
         output_keys = ['output_directory', 'output_dir', 'outputDirectory', 'output_path', 'outputPath']
@@ -354,7 +339,7 @@ def find_and_assign_user(bucket_name):
     current_username = get_current_username()
     print(f"[*] Current username: {current_username}")
     
-    # Special handling for ImageBuilderTest - use mount and assign user2
+    # Special handling for ImageBuilderTest - use mount-only workflow
     if current_username == 'imagebuildertest':
         print("[*] Test environment detected - using mount-only workflow")
         
@@ -364,48 +349,73 @@ def find_and_assign_user(bucket_name):
             print("[X] Mount not available for test environment")
             return None
         
-        # Force assignment to user2 for test environment
-        assigned_user = 'user2'
-        print(f"[+] Test environment assigned to: {assigned_user}")
+        # For test environment, first check if user is already assigned
+        print("Scanning mount for available user folders...")
+        user_folders = list_user_folders_mount(mount_path)
+
+        if user_folders:
+            assigned_user = None
+            
+            # First pass: check if current user already has an assignment
+            for user_folder in user_folders:
+                is_taken, taken_by_content = check_user_taken_mount(mount_path, user_folder)
+                
+                if is_taken and taken_by_content:
+                    # Extract username from first line (mount format: username only)
+                    taken_by_user = taken_by_content.split('\n')[0].strip().lower()
+                    if taken_by_user == current_username:
+                        print(f"[+] Found existing assignment: {user_folder} for {current_username}")
+                        assigned_user = user_folder
+                        print(f"[+] Test environment using existing assignment: {assigned_user}")
+                        break
+            
+            # Second pass: if no existing assignment, find available folder
+            if not assigned_user:
+                for user_folder in user_folders:
+                    is_taken, taken_by = check_user_taken_mount(mount_path, user_folder)
+                    
+                    if not is_taken:
+                        print(f"[+] Found available folder: {user_folder}")
+                        if claim_user_folder_mount(mount_path, user_folder, current_username):
+                            assigned_user = user_folder
+                            print(f"[+] Test environment assigned to: {assigned_user}")
+                            break
         
-        # Check if user2 exists in mount (mount_path is already C:/s3_bucket/ibd_root)
-        user_folder_path = mount_path / assigned_user
-        if not user_folder_path.exists():
-            print(f"[X] {assigned_user} folder not found in mount at {user_folder_path}")
-            return None
-        
-        # Claim user2 in mount (create taken_by.txt)
-        if not claim_user_folder_mount(mount_path, assigned_user, current_username):
-            print(f"[!] Could not claim {assigned_user} in mount, but continuing...")
-        
-        # Save assignment locally
-        save_local_user_file(assigned_user)
-        return assigned_user
-    
-    # Check if user is already assigned locally (for non-test users)
-    assigned_user = check_local_user_file()
-    if assigned_user:
-        print(f"[+] User already assigned: {assigned_user}")
         return assigned_user
     
     # Production workflow - try S3 first, then mount fallback
     print("\n" + "-" * 40)
     print("Attempting S3 connection...")
     s3_client = initialize_s3_client(bucket_name)
+
+    assigned_user = None
     
     if s3_client is not None:
         # S3 available - use S3 workflow
         print("Using S3 workflow...")
         user_folders = list_user_folders_s3(bucket_name, s3_client)
-        
+
         if user_folders:
+            # First pass: check if current user already has an assignment
             for user_folder in user_folders:
-                is_taken, taken_by = check_user_taken_s3(bucket_name, s3_client, user_folder)
+                is_taken, taken_by_content = check_user_taken_s3(bucket_name, s3_client, user_folder)
                 
-                if not is_taken:
-                    print(f"[+] Found available folder: {user_folder}")
-                    if claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
-                        if save_local_user_file(user_folder):
+                if is_taken and taken_by_content:
+                    # Extract username from first line (S3 format: username only)
+                    taken_by_user = taken_by_content.split('\n')[0].strip().lower()
+                    if taken_by_user == current_username:
+                        print(f"[+] Found existing assignment: {user_folder} for {current_username}")
+                        assigned_user = user_folder
+                        break
+            
+            # Second pass: if no existing assignment, find available folder
+            if not assigned_user:
+                for user_folder in user_folders:
+                    is_taken, taken_by = check_user_taken_s3(bucket_name, s3_client, user_folder)
+                    
+                    if not is_taken:
+                        print(f"[+] Found available folder: {user_folder}")
+                        if claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
                             assigned_user = user_folder
                             break
         
@@ -423,23 +433,37 @@ def find_and_assign_user(bucket_name):
             user_folders = list_user_folders_mount(mount_path)
             
             if user_folders:
+                assigned_user = None
+                # First pass: check if current user already has an assignment
                 for user_folder in user_folders:
-                    is_taken, taken_by = check_user_taken_mount(mount_path, user_folder)
+                    is_taken, taken_by_content = check_user_taken_mount(mount_path, user_folder)
                     
-                    if not is_taken:
-                        print(f"[+] Found available folder: {user_folder}")
-                        if claim_user_folder_mount(mount_path, user_folder, current_username):
-                            if save_local_user_file(user_folder):
+                    if is_taken and taken_by_content:
+                        # Extract username from first line (mount format: username only)
+                        taken_by_user = taken_by_content.split('\n')[0].strip().lower()
+                        if taken_by_user == current_username:
+                            print(f"[+] Found existing assignment: {user_folder} for {current_username}")
+                            assigned_user = user_folder
+                            break
+                
+                # Second pass: if no existing assignment, find available folder
+                if not assigned_user:
+                    for user_folder in user_folders:
+                        is_taken, taken_by = check_user_taken_mount(mount_path, user_folder)
+                        
+                        if not is_taken:
+                            print(f"[+] Found available folder: {user_folder}")
+                            if claim_user_folder_mount(mount_path, user_folder, current_username):
                                 assigned_user = user_folder
                                 break
     
     # Final fallback - generate user assignment
     if not assigned_user:
         print("\n" + "-" * 40)
-        print("Using fallback user generation...")
-        assigned_user = current_username
-        save_local_user_file(assigned_user)
-        print(f"[+] Generated assignment: {assigned_user}")
+        print("No user folders available - cannot assign user")
+        print("[X] No user{i} folders found in S3 or mount")
+        print("[DEBUG] Make sure your S3 bucket or mount contains folders like: user1, user2, user3, etc.")
+        return None 
     
     return assigned_user
 
@@ -464,17 +488,19 @@ if __name__ == "__main__":
             current_username = get_current_username()
             
             # Special sync handling for test environment
+            # In the main assignment function, around line where sync happens:
             if current_username == 'imagebuildertest':
                 print("\n" + "-" * 40)
                 print("Test environment - syncing from mount only...")
                 mount_path = check_s3_mount_available()
                 if mount_path:
-                    # For test user, sync from mount to local directory
-                    source_dir = mount_path / "ibd_root" / assigned_user
+                    # Use assigned_user (which should be like "user1") directly
+                    source_dir = mount_path / assigned_user  # This should be mount_path / "user1"
                     local_dir = sync_mount_to_local_from_path(source_dir, assigned_user)
                     print(f"[+] Test user data synced from mount: {local_dir}")
                 else:
                     print("[!] Mount not available for test environment")
+                    # Create the user{i} directory, not defaultprofileuser
                     local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
                     local_dir.mkdir(parents=True, exist_ok=True)
             else:
@@ -489,7 +515,9 @@ if __name__ == "__main__":
                     if mount_path:
                         print("\n" + "-" * 40)
                         print("Syncing from mount...")
-                        local_dir = sync_mount_to_local(mount_path / "ibd_root", assigned_user)
+                        # Use the same function as test environment
+                        source_dir = mount_path / assigned_user
+                        local_dir = sync_mount_to_local_from_path(source_dir, assigned_user)
                     else:
                         print("[!] Neither S3 nor mount available - creating empty user dir")
                         local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
@@ -497,9 +525,9 @@ if __name__ == "__main__":
             
             # Update configuration
             if update_prep_seg_yaml(assigned_user):
-                print(f"[+] Configuration updated for user: {assigned_user}")
+                print(f"[+] Configuration updated for user folder: {assigned_user}")
             
-            # Output for batch parsing
+            # Output for batch parsing - use the user folder name
             print(f"\nASSIGNED_USER={assigned_user}")
             print(f"USER_HOME_DIR=C:/AppStreamUsers/{assigned_user}")
             

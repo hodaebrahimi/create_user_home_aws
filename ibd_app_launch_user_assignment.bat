@@ -6,16 +6,25 @@ echo ============================================
 REM Configuration - UPDATE THESE VALUES AS NEEDED
 set BUCKET_NAME=hoda2-ibd-sample-cases-us-west-2
 set PYTHON_SCRIPT_PATH=C:\Scripts\user_assignment_script.py
-set PYTHON_EXE=C:\MiniConda\miniconda3\envs\ibd-env2\python.exe
+set PYTHON_EXE=C:\MiniConda\miniconda3\python.exe
 
 REM Get the current username
 set USERNAME=%USERNAME%
 echo Current user: %USERNAME%
 
-REM Verify Python executable exists early
+REM Verify Python executable exists and is accessible
 if not exist "%PYTHON_EXE%" (
     echo ERROR: Python executable not found at %PYTHON_EXE%
     echo Please check the Python installation path.
+    pause
+    exit /b 1
+)
+
+REM Test if we can actually run Python
+"%PYTHON_EXE%" --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ERROR: Cannot execute Python at %PYTHON_EXE%
+    echo This may be a permissions issue.
     pause
     exit /b 1
 )
