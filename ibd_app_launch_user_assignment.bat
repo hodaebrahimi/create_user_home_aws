@@ -6,7 +6,7 @@ echo ============================================
 REM Configuration - UPDATE THESE VALUES AS NEEDED
 set BUCKET_NAME=hoda2-ibd-sample-cases-us-west-2
 set PYTHON_SCRIPT_PATH=C:\Scripts\user_assignment_script.py
-set PYTHON_EXE=C:\Users\ImageBuilderAdmin\miniconda3\envs\appstream-deploy\python.exe
+set PYTHON_EXE=C:\MiniConda\miniconda3\envs\ibd-env2\python.exe
 
 REM Get the current username
 set USERNAME=%USERNAME%
@@ -54,7 +54,7 @@ set "AWS_DEFAULT_REGION=us-west-2"
 set "SKIP_S3_OPERATIONS=%SKIP_S3_OPERATIONS%"
 echo Running Python script: %PYTHON_SCRIPT_PATH%
 echo Using Python executable: %PYTHON_EXE%
-python "%PYTHON_SCRIPT_PATH%" > temp_output.txt 2>&1
+"%PYTHON_EXE%" "%PYTHON_SCRIPT_PATH%" > temp_output.txt 2>&1
 
 echo Python script finished with exit code: %errorlevel%
 
