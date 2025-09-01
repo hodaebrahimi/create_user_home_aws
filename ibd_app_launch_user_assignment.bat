@@ -1,5 +1,15 @@
 @echo off
 setlocal enabledelayedexpansion
+
+REM === DEBUG SECTION ===
+echo DEBUG: Batch execution started at %DATE% %TIME% > C:\temp\appstream_debug.log
+echo DEBUG: Current user: %USERNAME% >> C:\temp\appstream_debug.log
+echo DEBUG: Current directory: %CD% >> C:\temp\appstream_debug.log
+echo DEBUG: Testing Python path... >> C:\temp\appstream_debug.log
+"C:\MiniConda\miniconda3\python.exe" --version >> C:\temp\appstream_debug.log 2>&1
+echo DEBUG: Python test exit code: %errorlevel% >> C:\temp\appstream_debug.log
+REM === END DEBUG SECTION ===
+
 echo Starting IBD Medical Imaging Annotation...
 echo ============================================
 
