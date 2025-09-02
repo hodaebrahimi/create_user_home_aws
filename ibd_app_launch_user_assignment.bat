@@ -16,11 +16,18 @@ echo ============================================
 REM Configuration - UPDATE THESE VALUES AS NEEDED
 set BUCKET_NAME=hoda2-ibd-sample-cases-us-west-2
 set PYTHON_SCRIPT_PATH=C:\Scripts\user_assignment_script.py
+set COMPLETION_SYNC_SCRIPT=C:\Scripts\completion_sync.py
 set PYTHON_EXE=C:\MiniConda\miniconda3\python.exe
 
 REM Get the current username
 set USERNAME=%USERNAME%
 echo Current user: %USERNAME%
+
+REM Configuration for S3 testing (set to 1 to enable comprehensive S3 tests)
+set "RUN_S3_TESTS=0"
+
+REM Uncomment the line below to enable comprehensive S3 testing
+REM set "RUN_S3_TESTS=1"
 
 REM Verify Python executable exists and is accessible
 if not exist "%PYTHON_EXE%" (
@@ -47,12 +54,15 @@ if not exist "%PYTHON_SCRIPT_PATH%" (
     exit /b 1
 )
 
-REM For ImageBuilderTest, set a flag to skip S3
+REM For ImageBuilderTest, set a flag to skip S3 (UNCHANGED)
 if /i "%USERNAME%"=="ImageBuilderTest" (
     echo TEST ENVIRONMENT DETECTED - Setting skip S3 flag
     set "SKIP_S3_OPERATIONS=1"
+    set "RUN_S3_TESTS=0"
 ) else (
     set "SKIP_S3_OPERATIONS=0"
+    REM Uncomment to enable S3 testing in production
+    REM set "RUN_S3_TESTS=1"
 )
 
 echo Stopping any background S3 sync processes...
@@ -71,11 +81,18 @@ echo.
 REM Call the user assignment Python script and capture output
 set "AWS_DEFAULT_REGION=us-west-2"
 set "SKIP_S3_OPERATIONS=%SKIP_S3_OPERATIONS%"
+set "RUN_S3_TESTS=%RUN_S3_TESTS%"
+
+if "%RUN_S3_TESTS%"=="1" (
+    echo.
+    echo *** S3 COMPREHENSIVE TESTING ENABLED ***
+    echo This will run additional S3 validation tests
+    echo.
+)
+
 echo Running Python script: %PYTHON_SCRIPT_PATH%
 echo Using Python executable: %PYTHON_EXE%
 "%PYTHON_EXE%" "%PYTHON_SCRIPT_PATH%" > temp_output.txt 2>&1
-
-echo Python script finished with exit code: %errorlevel%
 
 REM Check the exit code
 if %errorlevel% neq 0 (
@@ -188,7 +205,7 @@ if /i "%USERNAME%"=="ImageBuilderTest" (
 
 if %errorlevel% neq 0 (
     echo ERROR: Data preparation failed
-    goto ERROR_EXIT
+    goto ERROR_EXIT_WITH_SYNC
 )
 
 echo TRACE: prep finished, continuing to Step 2
@@ -201,26 +218,128 @@ echo Working directory: %CD%
 echo USER_HOME_DIR: %USER_HOME_DIR%
 echo ASSIGNED_USER: %ASSIGNED_USER%
 echo TRACE: launching main app...
-"%PYTHON_EXE%" ibd_manual_labeling_speedup.py
+
+REM Add debug information before launching
+echo DEBUG: AWS CLI S3 access test...
+aws s3 ls s3://hoda2-ibd-sample-cases-us-west-2 --region us-west-2
+if %errorlevel% neq 0 (
+    echo WARNING: AWS CLI S3 access failed
+) else (
+    echo SUCCESS: AWS CLI S3 access confirmed
+)
+
+echo DEBUG: Python boto3 test...
+echo import boto3; s3=boto3.client('s3',region_name='us-west-2'); print('S3 client created'); s3.head_bucket(Bucket='hoda2-ibd-sample-cases-us-west-2'); print('SUCCESS: boto3 S3 access confirmed') > test_boto3.py
+"%PYTHON_EXE%" test_boto3.py
+if %errorlevel% neq 0 (
+    echo WARNING: Python boto3 S3 access failed - this may cause app issues
+) else (
+    echo SUCCESS: Python boto3 S3 access confirmed
+)
+del test_boto3.py 2>nul
+
+echo TRACE: Starting main app now...
+"%PYTHON_EXE%" ibd_manual_labeling_speedup.py 2>&1
 set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
 echo TRACE: main app exited with %PYTHON_EXIT_CODE%
 
-if not "%PYTHON_EXIT_CODE%"=="0" (
-    echo TRACE: goto ERROR_EXIT from MAIN (saved exit=%PYTHON_EXIT_CODE%)
-    goto ERROR_EXIT
+REM Step 3: Sync completed cases to S3 (runs regardless of main app exit code)
+echo.
+echo Step 3: Syncing completed cases to S3...
+echo TRACE: starting completion sync...
+
+REM Check if completion sync script exists
+if not exist "%COMPLETION_SYNC_SCRIPT%" (
+    echo ERROR: Completion sync script not found at %COMPLETION_SYNC_SCRIPT%
+    echo Please ensure the completion_sync.py script is in place
+    echo Skipping sync for this session
+    goto SKIP_SYNC
 )
 
+REM Run the completion sync
+echo Running completion sync script...
+echo Command: "%PYTHON_EXE%" "%COMPLETION_SYNC_SCRIPT%" "%BUCKET_NAME%" "%ASSIGNED_USER%" "%USER_HOME%"
+
+"%PYTHON_EXE%" "%COMPLETION_SYNC_SCRIPT%" "%BUCKET_NAME%" "%ASSIGNED_USER%" "%USER_HOME%"
+set "SYNC_EXIT_CODE=%ERRORLEVEL%"
+echo TRACE: completion sync exited with %SYNC_EXIT_CODE%
+goto SYNC_DONE
+
+:SKIP_SYNC
+echo [!] Completion sync was skipped - script not found
+set "SYNC_EXIT_CODE=999"
+
+:SYNC_DONE
+REM Report sync results
+if "%SYNC_EXIT_CODE%"=="0" (
+    echo [+] Completion sync completed successfully
+) else (
+    echo [!] Completion sync finished with issues (exit code %SYNC_EXIT_CODE%)
+)
+
+echo TRACE: Reached exit code check section
+echo DEBUG: About to check main app exit code
+echo DEBUG: PYTHON_EXIT_CODE is: "%PYTHON_EXIT_CODE%"
+echo DEBUG: SYNC_EXIT_CODE is: "%SYNC_EXIT_CODE%"
+
+REM Check for success - both must be 0
+if "%PYTHON_EXIT_CODE%"=="0" (
+    if "%SYNC_EXIT_CODE%"=="0" (
+        echo DEBUG: Both succeeded - going to success
+        goto SUCCESS_SECTION
+    ) else (
+        echo DEBUG: Sync failed - going to error
+        goto ERROR_EXIT_FINAL
+    )
+) else (
+    echo DEBUG: Main app failed - going to error  
+    goto ERROR_EXIT_FINAL
+)
+
+REM This line should never execute
+echo ERROR: Fell through exit code check - this should not happen!
+goto ERROR_EXIT_FINAL
+
+:SUCCESS_SECTION
 echo.
 echo ============================================
 echo IBD Annotator completed successfully!
 echo User: %ASSIGNED_USER%
 echo User data available in: %USER_HOME%
 echo S3 bucket: %BUCKET_NAME%
+echo Main app exit code: %PYTHON_EXIT_CODE%
+echo Sync exit code: %SYNC_EXIT_CODE%
 echo ============================================
+
+
+REM Always show completion sync summary before closing
+echo.
+echo COMPLETION SYNC SUMMARY:
+if "%SYNC_EXIT_CODE%"=="0" (
+    echo - All completed cases have been synced to S3
+    echo - Check sync_tracking.json in user directory for details
+) else (
+    echo - Some issues occurred during sync (check logs above)
+    echo - You may need to run sync manually later
+)
+
 goto END
 
-:ERROR_EXIT
-echo TRACE: ENTERED ERROR_EXIT at %DATE% %TIME%
+:ERROR_EXIT_WITH_SYNC
+echo TRACE: ENTERED ERROR_EXIT_WITH_SYNC at %DATE% %TIME%
+echo.
+echo ERROR: Data preparation failed, but still attempting completion sync...
+
+REM Still try to sync any existing completed cases
+if exist "%COMPLETION_SYNC_SCRIPT%" (
+    echo Running emergency completion sync...
+    "%PYTHON_EXE%" "%COMPLETION_SYNC_SCRIPT%" "%BUCKET_NAME%" "%ASSIGNED_USER%" "%USER_HOME%" 2>nul
+)
+
+goto ERROR_EXIT_FINAL
+
+:ERROR_EXIT_FINAL
+echo TRACE: ENTERED ERROR_EXIT_FINAL at %DATE% %TIME%
 echo.
 echo ============================================
 echo An error occurred during execution.
@@ -235,11 +354,20 @@ echo.
 echo Assigned user: %ASSIGNED_USER%
 echo User home directory: %USER_HOME%
 echo S3 bucket: %BUCKET_NAME%
+echo Main app exit code: %PYTHON_EXIT_CODE%
+echo Sync exit code: %SYNC_EXIT_CODE%
 echo ============================================
+
+REM Show what was synced even on error
 echo.
-echo Press any key to close...
-pause > nul
-exit /b 1
+echo COMPLETION SYNC STATUS:
+if "%SYNC_EXIT_CODE%"=="0" (
+    echo - Completed cases were synced successfully
+) else (
+    echo - Sync had issues or was skipped
+)
+
+goto END
 
 :END
 echo.
