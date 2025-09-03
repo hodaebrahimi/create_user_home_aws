@@ -3,12 +3,13 @@
 IBD Case Completion Sync Script
 
 Scans user directories for completed cases (marked by 01_labeling_complete.txt)
-and syncs completion artifacts to S3, excluding large original files.
+and syncs completion artifacts to S3 or mounted S3, excluding large original files.
 """
 
 import os
 import sys
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 import boto3
@@ -23,21 +24,8 @@ def get_current_username():
                'unknown_user')
     return username.lower()
 
-def should_skip_s3_operations():
-    """Check if we should skip S3 operations (test environment)"""
-    skip_s3 = os.environ.get('SKIP_S3_OPERATIONS', '0')
-    current_username = get_current_username()
-    
-    if skip_s3 == '1' or current_username == 'imagebuildertest':
-        return True
-    return False
-
 def initialize_s3_client_for_sync(bucket_name):
-    """Initialize S3 client specifically for sync operations"""
-    if should_skip_s3_operations():
-        print("[*] Test environment detected - skipping S3 operations")
-        return None
-    
+    """Initialize S3 client specifically for sync operations - no username checks"""
     try:
         print("[*] Initializing S3 client for completion sync...")
         region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
@@ -51,13 +39,25 @@ def initialize_s3_client_for_sync(bucket_name):
     except ClientError as e:
         error_code = e.response['Error']['Code']
         print(f"[!] S3 client initialization failed: {error_code}")
+        if error_code == 'AccessDenied':
+            print("[*] No S3 permissions - will attempt mount fallback")
         return None
     except NoCredentialsError:
-        print("[!] No AWS credentials found - sync disabled")
+        print("[!] No AWS credentials found - will attempt mount fallback")
         return None
     except Exception as e:
-        print(f"[!] S3 connection failed: {e}")
+        print(f"[!] S3 connection failed: {e} - will attempt mount fallback")
         return None
+
+def check_s3_mount_available():
+    """Check if S3 bucket is mounted locally"""
+    mount_path = Path("C:/s3_bucket/ibd_root")
+    if mount_path.exists() and mount_path.is_dir():
+        print(f"[+] S3 mount available at: {mount_path}")
+        return mount_path
+    
+    print(f"[!] S3 mount not available at: {mount_path}")
+    return None
 
 def find_completed_cases(user_home_dir):
     """Find all cases marked as complete in the user directory"""
@@ -108,10 +108,9 @@ def save_sync_tracking(sync_tracking_file, tracking_data):
         print(f"[!] Error saving sync tracking: {e}")
         return False
 
-def sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_dir):
-    """Sync completion artifacts for a specific case to S3"""
+def get_completion_files_to_sync(case_dir, assigned_user):
+    """Get list of completion files to sync for a case"""
     case_name = case_dir.name
-    s3_case_prefix = f"ibd_root/{assigned_user}/{case_name}/"
     
     # Files to sync when case is complete (excluding large original files)
     completion_patterns = [
@@ -129,36 +128,46 @@ def sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_d
         "intestine_train_*.nii.gz",          # Original training images
         "organs_*_ibd.nii.gz",              # Original organ files (not user-created)
         "*.tmp",
-        "*.temp"
+        "*.temp",
+        "02_synced_to_*"                     # Previous sync flags
     ]
+    
+    # Collect all files to potentially sync
+    files_to_sync = []
+    
+    for pattern in completion_patterns:
+        matching_files = list(case_dir.glob(pattern))
+        files_to_sync.extend(matching_files)
+    
+    # Filter out excluded files
+    filtered_files = []
+    for file_path in files_to_sync:
+        should_exclude = False
+        for exclude_pattern in exclude_patterns:
+            if fnmatch.fnmatch(file_path.name, exclude_pattern):
+                should_exclude = True
+                print(f"    [~] Excluding: {file_path.name}")
+                break
+        
+        if not should_exclude and file_path.is_file():
+            filtered_files.append(file_path)
+    
+    return filtered_files
+
+def sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_dir):
+    """Sync completion artifacts for a specific case to S3"""
+    case_name = case_dir.name
+    s3_case_prefix = f"ibd_root/{assigned_user}/{case_name}/"
     
     uploaded_files = 0
     
     try:
         print(f"  [*] Syncing completion artifacts for case: {case_name}")
         
-        # Collect all files to potentially upload
-        files_to_upload = []
-        
-        for pattern in completion_patterns:
-            matching_files = list(case_dir.glob(pattern))
-            files_to_upload.extend(matching_files)
-        
-        # Filter out excluded files
-        filtered_files = []
-        for file_path in files_to_upload:
-            should_exclude = False
-            for exclude_pattern in exclude_patterns:
-                if fnmatch.fnmatch(file_path.name, exclude_pattern):
-                    should_exclude = True
-                    print(f"    [~] Excluding: {file_path.name}")
-                    break
-            
-            if not should_exclude and file_path.is_file():
-                filtered_files.append(file_path)
+        files_to_upload = get_completion_files_to_sync(case_dir, assigned_user)
         
         # Upload filtered files
-        for local_file_path in filtered_files:
+        for local_file_path in files_to_upload:
             relative_path = local_file_path.name
             s3_key = s3_case_prefix + relative_path
             
@@ -220,6 +229,48 @@ def sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_d
         print(f"  [X] Error syncing case {case_name}: {e}")
         return False
 
+def sync_case_to_mount(mount_path, assigned_user, case_dir):
+    """Sync completion artifacts for a specific case to mounted S3"""
+    case_name = case_dir.name
+    mount_case_path = mount_path / assigned_user / case_name
+    
+    try:
+        print(f"  [*] Syncing completion artifacts to mount for case: {case_name}")
+        
+        # Create mount case directory
+        mount_case_path.mkdir(parents=True, exist_ok=True)
+        
+        files_to_sync = get_completion_files_to_sync(case_dir, assigned_user)
+        
+        copied_files = 0
+        for local_file_path in files_to_sync:
+            mount_file_path = mount_case_path / local_file_path.name
+            
+            try:
+                shutil.copy2(local_file_path, mount_file_path)
+                copied_files += 1
+                print(f"    [+] Copied: {local_file_path.name}")
+            except Exception as e:
+                print(f"    [X] Failed to copy {local_file_path.name}: {e}")
+        
+        # Create completion timestamp in mount
+        if copied_files > 0:
+            timestamp_file = mount_case_path / "completion_sync_timestamp.txt"
+            timestamp_content = f"Case {case_name} completion artifacts synced by {assigned_user} at {datetime.now().isoformat()}\nFiles synced: {copied_files}"
+            
+            try:
+                timestamp_file.write_text(timestamp_content)
+                print(f"    [+] Created sync timestamp")
+            except Exception as e:
+                print(f"    [!] Could not create sync timestamp: {e}")
+        
+        print(f"  [+] Case sync to mount completed: {copied_files} files copied")
+        return copied_files > 0
+        
+    except Exception as e:
+        print(f"  [X] Error syncing case {case_name} to mount: {e}")
+        return False
+
 def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     """Main function to sync all completed cases"""
     print("=" * 60)
@@ -230,26 +281,43 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print(f"S3 Bucket: {bucket_name}")
     print("")
     
-    # Check if we should skip S3
-    if should_skip_s3_operations():
-        print("[*] Test environment - S3 sync disabled")
-        return True
-    
-    # Initialize S3 client
-    s3_client = initialize_s3_client_for_sync(bucket_name)
-    if not s3_client:
-        print("[!] S3 not available - sync skipped")
-        return False
-    
-    # Find completed cases
+    # Find completed cases first
     completed_cases = find_completed_cases(user_home_dir)
     if not completed_cases:
         print("[*] No completed cases found - nothing to sync")
         return True
     
+    # Try S3 first, then mount fallback based on actual connectivity
+    s3_client = initialize_s3_client_for_sync(bucket_name)
+    sync_mode = None
+    mount_path = None
+    
+    if s3_client is not None:
+        sync_mode = "s3"
+        print("[*] Using S3 sync mode")
+    else:
+        mount_path = check_s3_mount_available()
+        if mount_path:
+            sync_mode = "mount"
+            print("[*] Using mount sync mode")
+        else:
+            print("[!] Neither S3 nor mount available - cannot sync completed cases")
+            print("[!] Completed cases remain in local directory only")
+            return False
+    
     # Load sync tracking
     sync_tracking_file = get_sync_tracking_file(user_home_dir)
     sync_tracking = load_sync_tracking(sync_tracking_file)
+    
+    # Add sync mode to tracking
+    if 'sync_sessions' not in sync_tracking:
+        sync_tracking['sync_sessions'] = []
+    
+    session_info = {
+        'timestamp': datetime.now().isoformat(),
+        'sync_mode': sync_mode,
+        'total_cases': len(completed_cases)
+    }
     
     # Sync each completed case
     synced_cases = 0
@@ -258,25 +326,43 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     for case_dir in completed_cases:
         case_name = case_dir.name
         
-        # Check if already synced
+        # Check if already synced (check for mount or S3 sync flags)
         completion_flag = case_dir / "01_labeling_complete.txt"
         completion_time = completion_flag.stat().st_mtime if completion_flag.exists() else 0
         
         last_synced = sync_tracking.get(case_name, {}).get('last_synced_timestamp', 0)
         
-        if completion_time <= last_synced:
+        # Check for existing sync flag files
+        s3_sync_flag = case_dir / "02_synced_to_s3.txt"
+        mount_sync_flag = case_dir / "02_synced_to_mount.txt"
+        
+        if completion_time <= last_synced and (s3_sync_flag.exists() or mount_sync_flag.exists()):
             print(f"  [=] Case {case_name} already synced")
             continue
         
         # Sync the case
         print(f"  [*] Syncing case {synced_cases + 1}/{total_cases}: {case_name}")
         
-        if sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_dir):
+        sync_successful = False
+        
+        if sync_mode == "s3":
+            if sync_case_completion_artifacts(s3_client, bucket_name, assigned_user, case_dir):
+                # Create local sync flag
+                s3_sync_flag.write_text(f"Synced to S3 at {datetime.now().isoformat()}")
+                sync_successful = True
+        elif sync_mode == "mount":
+            if sync_case_to_mount(mount_path, assigned_user, case_dir):
+                # Create local sync flag
+                mount_sync_flag.write_text(f"Synced to mount at {datetime.now().isoformat()}")
+                sync_successful = True
+        
+        if sync_successful:
             # Update tracking
             sync_tracking[case_name] = {
                 'last_synced_timestamp': datetime.now().timestamp(),
                 'last_synced_iso': datetime.now().isoformat(),
-                'sync_successful': True
+                'sync_successful': True,
+                'sync_mode': sync_mode
             }
             synced_cases += 1
         else:
@@ -284,15 +370,22 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
             sync_tracking[case_name] = {
                 'last_synced_timestamp': sync_tracking.get(case_name, {}).get('last_synced_timestamp', 0),
                 'last_attempted_iso': datetime.now().isoformat(),
-                'sync_successful': False
+                'sync_successful': False,
+                'sync_mode': sync_mode
             }
+    
+    # Update session info
+    session_info['synced_cases'] = synced_cases
+    session_info['failed_cases'] = total_cases - synced_cases
+    sync_tracking['sync_sessions'].append(session_info)
+    sync_tracking['last_sync_mode'] = sync_mode
     
     # Save tracking information
     save_sync_tracking(sync_tracking_file, sync_tracking)
     
     print("")
     print("=" * 60)
-    print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced")
+    print(f"SYNC COMPLETED ({sync_mode.upper()}): {synced_cases}/{total_cases} cases synced")
     print("=" * 60)
     
     return synced_cases > 0 or total_cases == 0

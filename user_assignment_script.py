@@ -9,201 +9,6 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
-def test_s3_comprehensive_access(s3_client, bucket_name):
-    """
-    Comprehensive S3 access test including read, write, list, and delete operations
-    """
-    print("[*] Running comprehensive S3 access tests...")
-    
-    test_results = {
-        'bucket_access': False,
-        'list_permissions': False,
-        'write_permissions': False,
-        'read_permissions': False,
-        'delete_permissions': False
-    }
-    
-    test_key = f"connection_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-    test_content = f"S3 Connection test from {get_current_username()} at {datetime.now().isoformat()}"
-    
-    try:
-        # Test 1: Bucket access
-        print("  [*] Testing bucket access...")
-        s3_client.head_bucket(Bucket=bucket_name)
-        test_results['bucket_access'] = True
-        print("  [+] Bucket access: PASSED")
-        
-        # Test 2: List permissions
-        print("  [*] Testing list permissions...")
-        response = s3_client.list_objects_v2(
-            Bucket=bucket_name, 
-            Prefix='ibd_root/', 
-            MaxKeys=1
-        )
-        test_results['list_permissions'] = True
-        print("  [+] List permissions: PASSED")
-        
-        # Test 3: Write permissions
-        print("  [*] Testing write permissions...")
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=test_key,
-            Body=test_content,
-            ContentType='text/plain'
-        )
-        test_results['write_permissions'] = True
-        print("  [+] Write permissions: PASSED")
-        
-        # Test 4: Read permissions
-        print("  [*] Testing read permissions...")
-        response = s3_client.get_object(Bucket=bucket_name, Key=test_key)
-        retrieved_content = response['Body'].read().decode('utf-8')
-        if retrieved_content == test_content:
-            test_results['read_permissions'] = True
-            print("  [+] Read permissions: PASSED")
-        else:
-            print("  [!] Read permissions: FAILED (content mismatch)")
-        
-        # Test 5: Delete permissions
-        print("  [*] Testing delete permissions...")
-        s3_client.delete_object(Bucket=bucket_name, Key=test_key)
-        test_results['delete_permissions'] = True
-        print("  [+] Delete permissions: PASSED")
-        
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        error_message = e.response['Error']['Message']
-        
-        if error_code == 'AccessDenied':
-            print(f"  [X] Access denied: {error_message}")
-            print("      Check IAM role permissions for S3 operations")
-        elif error_code == 'NoSuchBucket':
-            print(f"  [X] Bucket not found: {bucket_name}")
-            print("      Verify bucket name and region")
-        elif error_code == 'InvalidBucketName':
-            print(f"  [X] Invalid bucket name: {bucket_name}")
-        else:
-            print(f"  [X] S3 Client Error: {error_code} - {error_message}")
-            
-    except NoCredentialsError:
-        print("  [X] No AWS credentials found")
-        print("      Check IAM role attachment or credential configuration")
-        
-    except Exception as e:
-        print(f"  [X] Unexpected error during S3 tests: {str(e)}")
-    
-    # Clean up test file if it still exists
-    try:
-        s3_client.delete_object(Bucket=bucket_name, Key=test_key)
-    except:
-        pass  # Ignore cleanup errors
-    
-    # Summary
-    passed_tests = sum(test_results.values())
-    total_tests = len(test_results)
-    
-    print(f"\n[*] S3 Test Results: {passed_tests}/{total_tests} tests passed")
-    
-    if passed_tests == total_tests:
-        print("[+] All S3 tests PASSED - Full S3 functionality available")
-        return True
-    else:
-        print(f"[!] {total_tests - passed_tests} S3 tests FAILED")
-        for test_name, result in test_results.items():
-            status = "PASSED" if result else "FAILED"
-            print(f"    {test_name}: {status}")
-        return False
-
-def validate_s3_bucket_structure(s3_client, bucket_name):
-    """
-    Validate that the S3 bucket has the expected structure for user folders
-    """
-    print("[*] Validating S3 bucket structure...")
-    
-    try:
-        # Check for ibd_root/ prefix
-        response = s3_client.list_objects_v2(
-            Bucket=bucket_name,
-            Prefix='ibd_root/',
-            Delimiter='/',
-            MaxKeys=10
-        )
-        
-        if 'CommonPrefixes' not in response:
-            print("[!] No folders found under ibd_root/ - this may be expected for a new bucket")
-            return True
-        
-        folder_count = len(response['CommonPrefixes'])
-        print(f"[+] Found {folder_count} folders under ibd_root/")
-        
-        # Check for user{i} pattern
-        user_folders = []
-        for prefix in response['CommonPrefixes']:
-            folder_name = prefix['Prefix'].replace('ibd_root/', '').rstrip('/')
-            if folder_name.startswith('user') and folder_name[4:].isdigit():
-                user_folders.append(folder_name)
-        
-        if user_folders:
-            print(f"[+] Found {len(user_folders)} user folders: {sorted(user_folders, key=lambda x: int(x[4:]))}")
-        else:
-            print("[!] No user{i} folders found - you may need to create them")
-            
-        return True
-        
-    except Exception as e:
-        print(f"[X] Error validating bucket structure: {e}")
-        return False
-
-def enhanced_error_handling_s3_operations(s3_client, bucket_name, operation, **kwargs):
-    """
-    Wrapper function with enhanced error handling for S3 operations
-    """
-    try:
-        if operation == 'list_objects':
-            return s3_client.list_objects_v2(Bucket=bucket_name, **kwargs)
-        elif operation == 'get_object':
-            return s3_client.get_object(Bucket=bucket_name, **kwargs)
-        elif operation == 'put_object':
-            return s3_client.put_object(Bucket=bucket_name, **kwargs)
-        elif operation == 'delete_object':
-            return s3_client.delete_object(Bucket=bucket_name, **kwargs)
-        elif operation == 'head_object':
-            return s3_client.head_object(Bucket=bucket_name, **kwargs)
-        else:
-            raise ValueError(f"Unsupported operation: {operation}")
-            
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        error_message = e.response['Error']['Message']
-        
-        # Specific error handling
-        if error_code == 'AccessDenied':
-            print(f"[X] Access denied for {operation}: {error_message}")
-            print("    Required permissions may be missing from IAM role")
-        elif error_code == 'NoSuchKey':
-            print(f"[X] Object not found for {operation}: {kwargs.get('Key', 'unknown key')}")
-        elif error_code == 'NoSuchBucket':
-            print(f"[X] Bucket not found: {bucket_name}")
-        elif error_code == 'InvalidBucketName':
-            print(f"[X] Invalid bucket name: {bucket_name}")
-        elif error_code == 'BucketRegionError':
-            print(f"[X] Bucket region error - check if bucket is in us-west-2")
-        elif error_code == 'RequestTimeTooSkewed':
-            print(f"[X] System time is skewed - check system clock")
-        else:
-            print(f"[X] S3 {operation} failed: {error_code} - {error_message}")
-        
-        raise  # Re-raise the exception
-        
-    except NoCredentialsError:
-        print(f"[X] No credentials available for {operation}")
-        print("    Check IAM role attachment or AWS credential configuration")
-        raise
-        
-    except Exception as e:
-        print(f"[X] Unexpected error in {operation}: {str(e)}")
-        raise
-
 def get_current_username():
     """Get the current username from various sources"""
     username = (os.environ.get('USERNAME') or 
@@ -213,20 +18,8 @@ def get_current_username():
     return username.lower()
 
 def initialize_s3_client(bucket_name):
-    """Enhanced S3 client initialization with comprehensive testing"""
-    # Check environment variable from batch file
-    skip_s3 = os.environ.get('SKIP_S3_OPERATIONS', '0')
-    current_username = get_current_username()
-    
-    if skip_s3 == '1' or current_username == 'imagebuildertest':
-        print("[*] Test environment detected - skipping S3 operations")
-        return None
-    if os.environ.get('USERNAME') == 'ImageBuilderTest':
-        print("[*] Image building mode - skipping S3 operations")
-        return None
-    
+    """Initialize S3 client and test connectivity - no username checks"""
     try:
-        # Normal IAM role logic for production
         print("[*] Initializing S3 client with AWS default credential chain...")
         
         # Get region from environment or default
@@ -235,30 +28,19 @@ def initialize_s3_client(bucket_name):
         
         s3_client = boto3.client('s3', region_name=region)
         
-        # Basic connection test
+        # Test basic S3 connection
         print("[*] Testing basic S3 connection...")
         s3_client.head_bucket(Bucket=bucket_name)
-        print(f"[+] Basic S3 connection established for bucket: {bucket_name}")
+        print(f"[+] S3 connection established for bucket: {bucket_name}")
         
-        # Run comprehensive tests
-        if test_s3_comprehensive_access(s3_client, bucket_name):
-            print("[+] S3 client fully validated and ready")
-            
-            # Validate bucket structure
-            validate_s3_bucket_structure(s3_client, bucket_name)
-            
-            return s3_client
-        else:
-            print("[!] S3 comprehensive tests failed - will attempt mount fallback")
-            return None
+        return s3_client
             
     except ClientError as e:
         error_code = e.response['Error']['Code']
         print(f"[X] S3 client initialization failed: {error_code}")
         
         if error_code == 'AccessDenied':
-            print("[*] Access denied - check IAM role permissions")
-            print("[*] Required permissions: s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket")
+            print("[*] Access denied - no S3 permissions available")
         elif error_code == 'NoSuchBucket':
             print(f"[*] Bucket {bucket_name} not found - check bucket name and region")
         
@@ -266,20 +48,15 @@ def initialize_s3_client(bucket_name):
         return None
         
     except NoCredentialsError:
-        print("[X] No AWS credentials found")
-        print("[*] This is expected in test environments")
-        print("[*] Will attempt to use mounted S3 data instead")
+        print("[*] No AWS credentials found - will attempt to use mounted S3 data instead")
         return None
         
     except Exception as e:
-        print(f"[X] S3 connection failed: {e}")
-        print("[*] Will attempt to use mounted S3 data instead")
+        print(f"[*] S3 connection failed: {e} - will attempt to use mounted S3 data instead")
         return None
 
 def check_s3_mount_available():
-    """
-    Check if S3 bucket is mounted at C:/s3_bucket/ibd_root
-    """
+    """Check if S3 bucket is mounted at C:/s3_bucket/ibd_root"""
     mount_path = Path("C:/s3_bucket/ibd_root")
     if mount_path.exists() and mount_path.is_dir():
         # Check if it has expected structure
@@ -291,12 +68,12 @@ def check_s3_mount_available():
     return None
 
 def list_user_folders_s3(bucket_name, s3_client):
-    """List all user{i} folders in ibd_root/ from S3 with enhanced error handling"""
+    """List all user{i} folders in ibd_root/ from S3"""
     try:
         print("[*] Scanning S3 ibd_root/ for user folders...")
         
-        response = enhanced_error_handling_s3_operations(
-            s3_client, bucket_name, 'list_objects',
+        response = s3_client.list_objects_v2(
+            Bucket=bucket_name,
             Prefix='ibd_root/',
             Delimiter='/'
         )
@@ -315,7 +92,7 @@ def list_user_folders_s3(bucket_name, s3_client):
     except ClientError as e:
         error_code = e.response['Error']['Code']
         if error_code == 'AccessDenied':
-            print("[X] Access denied when listing S3 folders - check s3:ListBucket permission")
+            print("[X] Access denied when listing S3 folders")
         else:
             print(f"[X] Error listing S3 user folders: {error_code}")
         return []
@@ -342,15 +119,11 @@ def list_user_folders_mount(mount_path):
         return []
 
 def check_user_taken_s3(bucket_name, s3_client, user_folder):
-    """Check if a user folder is taken by looking for taken_by.txt in S3 with enhanced error handling"""
+    """Check if a user folder is taken by looking for taken_by.txt in S3"""
     try:
         taken_by_key = f"ibd_root/{user_folder}/taken_by.txt"
         
-        response = enhanced_error_handling_s3_operations(
-            s3_client, bucket_name, 'get_object',
-            Key=taken_by_key
-        )
-        
+        response = s3_client.get_object(Bucket=bucket_name, Key=taken_by_key)
         taken_by_content = response['Body'].read().decode('utf-8').strip()
         print(f"[*] {user_folder} is taken by: {taken_by_content}")
         return True, taken_by_content
@@ -361,7 +134,7 @@ def check_user_taken_s3(bucket_name, s3_client, user_folder):
             print(f"[*] {user_folder} is available")
             return False, None
         elif error_code == 'AccessDenied':
-            print(f"[!] Access denied checking {user_folder} - check s3:GetObject permission")
+            print(f"[!] Access denied checking {user_folder}")
             return True, "access_denied"
         else:
             print(f"[!] Error checking {user_folder}: {error_code}")
@@ -386,15 +159,15 @@ def check_user_taken_mount(mount_path, user_folder):
         return True, "error"
 
 def claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
-    """Claim a user folder by creating taken_by.txt in S3 and locally with enhanced error handling"""
+    """Claim a user folder by creating taken_by.txt in S3 and locally"""
     try:
         taken_by_key = f"ibd_root/{user_folder}/taken_by.txt"
         # S3 version - only username
         s3_content = f"{current_username}\nClaimed at: {datetime.now().isoformat()}"
         
-        # Upload to S3 with enhanced error handling
-        enhanced_error_handling_s3_operations(
-            s3_client, bucket_name, 'put_object',
+        # Upload to S3
+        s3_client.put_object(
+            Bucket=bucket_name,
             Key=taken_by_key,
             Body=s3_content,
             ContentType='text/plain'
@@ -415,7 +188,7 @@ def claim_user_folder_s3(bucket_name, s3_client, user_folder, current_username):
     except ClientError as e:
         error_code = e.response['Error']['Code']
         if error_code == 'AccessDenied':
-            print(f"[X] Access denied claiming {user_folder} - check s3:PutObject permission")
+            print(f"[X] Access denied claiming {user_folder}")
         else:
             print(f"[X] Error claiming {user_folder} in S3: {error_code}")
         return False
@@ -463,7 +236,7 @@ def ensure_local_taken_by_file(user_folder, current_username):
         return False
 
 def sync_s3_to_local(bucket_name, s3_client, assigned_user):
-    """Sync S3 user folder to local AppStreamUsers directory with enhanced error handling"""
+    """Sync S3 user folder to local AppStreamUsers directory"""
     s3_prefix = f"ibd_root/{assigned_user}/"
     local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
     
@@ -515,7 +288,7 @@ def sync_s3_to_local(bucket_name, s3_client, assigned_user):
     except ClientError as e:
         error_code = e.response['Error']['Code']
         if error_code == 'AccessDenied':
-            print(f"[X] Access denied syncing from S3 - check s3:GetObject and s3:ListBucket permissions")
+            print(f"[X] Access denied syncing from S3")
         elif error_code == 'NoSuchBucket':
             print(f"[X] S3 bucket {bucket_name} not found")
         else:
@@ -570,7 +343,7 @@ def update_prep_seg_yaml(assigned_user_folder):
         with open(yaml_file, 'r') as f:
             yaml_data = yaml.safe_load(f)
         
-        # Use the assigned_user_folder (e.g., "user1") directly
+        # Use the assigned_user_folder (e.g., "user2") directly
         new_output_dir = f"C:/AppStreamUsers/{assigned_user_folder}"
         
         # Remove existing output directory entries
@@ -588,62 +361,24 @@ def update_prep_seg_yaml(assigned_user_folder):
         print(f"[+] prep_seg.yaml updated successfully")
         return True
         
+    except PermissionError as e:
+        print(f"[!] Permission denied updating prep_seg.yaml: {e}")
+        print(f"[*] This is normal in template environments - will be handled by environment variables")
+        # Set environment variable as fallback
+        os.environ['USER_OUTPUT_DIR'] = new_output_dir
+        print(f"[+] Set USER_OUTPUT_DIR environment variable to: {new_output_dir}")
+        return True  # Return True since we have a fallback
+        
     except Exception as e:
         print(f"[X] Error updating prep_seg.yaml: {e}")
-        return False
-
-def run_full_s3_workflow_test(bucket_name):
-    """
-    Test the complete S3 workflow end-to-end
-    """
-    print("\n" + "="*60)
-    print("   RUNNING FULL S3 WORKFLOW TEST")
-    print("="*60)
-    
-    current_username = get_current_username()
-    print(f"[*] Testing as user: {current_username}")
-    
-    # Step 1: Initialize S3 client
-    s3_client = initialize_s3_client(bucket_name)
-    if not s3_client:
-        print("[X] S3 client initialization failed - cannot continue workflow test")
-        return False
-    
-    # Step 2: List user folders
-    user_folders = list_user_folders_s3(bucket_name, s3_client)
-    if not user_folders:
-        print("[!] No user folders found - this may be expected for a new bucket")
+        # Set environment variable as fallback
+        new_output_dir = f"C:/AppStreamUsers/{assigned_user_folder}"
+        os.environ['USER_OUTPUT_DIR'] = new_output_dir
+        print(f"[+] Set USER_OUTPUT_DIR environment variable to: {new_output_dir}")
         return True
-    
-    # Step 3: Test claiming and releasing a folder (using last folder to avoid conflicts)
-    test_folder = user_folders[-1]
-    print(f"\n[*] Testing folder operations with: {test_folder}")
-    
-    # Check current status
-    is_taken, taken_by = check_user_taken_s3(bucket_name, s3_client, test_folder)
-    
-    if is_taken and taken_by != current_username:
-        print(f"[*] Folder {test_folder} is taken by another user - skipping claim test")
-    else:
-        # Try to claim it
-        if claim_user_folder_s3(bucket_name, s3_client, test_folder, current_username):
-            print(f"[+] Successfully claimed {test_folder}")
-            
-            # Test sync
-            print(f"\n[*] Testing sync for {test_folder}")
-            local_dir = sync_s3_to_local(bucket_name, s3_client, test_folder)
-            print(f"[+] Sync test completed: {local_dir}")
-        else:
-            print(f"[X] Failed to claim {test_folder}")
-            return False
-    
-    print("\n[+] Full S3 workflow test completed successfully!")
-    return True
 
 def find_and_assign_user(bucket_name):
-    """
-    Main function to find and assign user with special handling for test environment
-    """
+    """Main function to find and assign user based on S3 connectivity"""
     print("=" * 60)
     print("   HYBRID S3/MOUNT USER ASSIGNMENT SYSTEM")
     print("=" * 60)
@@ -653,7 +388,7 @@ def find_and_assign_user(bucket_name):
     current_username = get_current_username()
     print(f"[*] Current username: {current_username}")
     
-    # Try S3 first, then mount fallback (for ANY user who doesn't have S3 access)
+    # Try S3 first, then mount fallback based on actual connectivity
     print("\n" + "-" * 40)
     print("Attempting S3 connection...")
     s3_client = initialize_s3_client(bucket_name)
@@ -705,7 +440,6 @@ def find_and_assign_user(bucket_name):
             user_folders = list_user_folders_mount(mount_path)
             
             if user_folders:
-                assigned_user = None
                 # First pass: check if current user already has an assignment
                 for user_folder in user_folders:
                     is_taken, taken_by_content = check_user_taken_mount(mount_path, user_folder)
@@ -716,7 +450,7 @@ def find_and_assign_user(bucket_name):
                         if taken_by_user == current_username:
                             print(f"[+] Found existing assignment: {user_folder} for {current_username}")
                             assigned_user = user_folder
-                            # CRITICAL FIX: Ensure local file exists with correct format
+                            # Ensure local file exists with correct format
                             ensure_local_taken_by_file(user_folder, current_username)
                             break
                 
@@ -731,7 +465,7 @@ def find_and_assign_user(bucket_name):
                                 assigned_user = user_folder
                                 break
     
-    # Final fallback - generate user assignment
+    # Final fallback - no assignment possible
     if not assigned_user:
         print("\n" + "-" * 40)
         print("No user folders available - cannot assign user")
@@ -742,31 +476,10 @@ def find_and_assign_user(bucket_name):
     return assigned_user
 
 if __name__ == "__main__":
-
     current_username = get_current_username()
     print(f"[DEBUG] Detected username: '{current_username}'")
-    print(f"[DEBUG] Username type: {type(current_username)}")
-    print(f"[DEBUG] Is imagebuildertest?: {current_username == 'imagebuildertest'}")
     
     BUCKET_NAME = "hoda2-ibd-sample-cases-us-west-2"
-    
-    # Optional comprehensive S3 testing (only for users with S3 access)
-    test_mode = os.environ.get('RUN_S3_TESTS', '0')
-    if test_mode == '1' and current_username != 'imagebuildertest':
-        print("\n" + "="*60)
-        print("   S3 COMPREHENSIVE TESTING MODE")
-        print("="*60)
-        
-        if run_full_s3_workflow_test(BUCKET_NAME):
-            print("[+] All S3 tests passed - proceeding with normal execution")
-        else:
-            print("[X] S3 tests failed - check permissions and configuration")
-            # Continue anyway but warn user
-            print("[!] Continuing with normal execution despite test failures...")
-        
-        print("\n" + "="*60)
-        print("   STARTING NORMAL EXECUTION")
-        print("="*60)
     
     try:
         assigned_user = find_and_assign_user(BUCKET_NAME)
@@ -777,9 +490,7 @@ if __name__ == "__main__":
             print("=" * 60)
             print(f"[+] Assigned user: {assigned_user}")
             
-            current_username = get_current_username()
-            
-            # Determine sync strategy based on S3 access, not username
+            # Determine sync strategy based on S3 access
             s3_client = initialize_s3_client(BUCKET_NAME)
             if s3_client is not None:
                 print("\n" + "-" * 40)

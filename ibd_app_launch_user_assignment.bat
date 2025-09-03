@@ -23,12 +23,6 @@ REM Get the current username
 set USERNAME=%USERNAME%
 echo Current user: %USERNAME%
 
-REM Configuration for S3 testing (set to 1 to enable comprehensive S3 tests)
-set "RUN_S3_TESTS=0"
-
-REM Uncomment the line below to enable comprehensive S3 testing
-REM set "RUN_S3_TESTS=1"
-
 REM Verify Python executable exists and is accessible
 if not exist "%PYTHON_EXE%" (
     echo ERROR: Python executable not found at %PYTHON_EXE%
@@ -54,19 +48,18 @@ if not exist "%PYTHON_SCRIPT_PATH%" (
     exit /b 1
 )
 
-REM For ImageBuilderTest, set a flag to skip S3 (UNCHANGED)
-if /i "%USERNAME%"=="ImageBuilderTest" (
-    echo TEST ENVIRONMENT DETECTED - Setting skip S3 flag
-    set "SKIP_S3_OPERATIONS=1"
-    set "RUN_S3_TESTS=0"
+REM Install Python dependencies
+echo Installing Python dependencies...
+C:\MiniConda\miniconda3\Scripts\pip.exe install -r C:\Scripts\ibd_labeling_local_1-main\requirements.txt >nul 2>&1
+if %errorlevel% neq 0 (
+    echo WARNING: Some dependencies may not have installed correctly
+    echo This may cause issues during execution
 ) else (
-    set "SKIP_S3_OPERATIONS=0"
-    REM Uncomment to enable S3 testing in production
-    REM set "RUN_S3_TESTS=1"
+    echo Dependencies installed successfully
 )
 
 echo Stopping any background S3 sync processes...
-taskkill /f /im python.exe 2>nul
+taskkill /f /im python.exe >nul 2>&1
 echo Waiting for processes to terminate...
 for /L %%i in (1,1,3) do (
     echo.
@@ -80,15 +73,6 @@ echo.
 
 REM Call the user assignment Python script and capture output
 set "AWS_DEFAULT_REGION=us-west-2"
-set "SKIP_S3_OPERATIONS=%SKIP_S3_OPERATIONS%"
-set "RUN_S3_TESTS=%RUN_S3_TESTS%"
-
-if "%RUN_S3_TESTS%"=="1" (
-    echo.
-    echo *** S3 COMPREHENSIVE TESTING ENABLED ***
-    echo This will run additional S3 validation tests
-    echo.
-)
 
 echo Running Python script: %PYTHON_SCRIPT_PATH%
 echo Using Python executable: %PYTHON_EXE%
@@ -194,16 +178,11 @@ REM Step 1: Run data preparation
 echo Step 1: Preparing segmentation data...
 echo TRACE: about to run prep_seg_data.py
 
-REM Test S3 access to determine which mode to use
-echo Testing S3 access for prep_seg_data.py mode selection...
-aws s3 ls s3://hoda2-ibd-sample-cases-us-west-2 --region us-west-2 >nul 2>&1
-if %errorlevel% neq 0 (
-    echo S3 access failed - using local mount for data preparation
-    "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml --use-local-mount
-) else (
-    echo S3 access successful - using S3 for data preparation  
-    "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml
-)
+REM Pass the user output directory as environment variable
+set "USER_OUTPUT_DIR=%USER_HOME%"
+
+REM Let prep_seg_data.py handle S3 vs mount detection automatically
+"%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml --use-local-mount
 
 if %errorlevel% neq 0 (
     echo ERROR: Data preparation failed
@@ -220,34 +199,13 @@ echo Working directory: %CD%
 echo USER_HOME_DIR: %USER_HOME_DIR%
 echo ASSIGNED_USER: %ASSIGNED_USER%
 echo TRACE: launching main app...
-
-REM Add debug information before launching
-echo DEBUG: AWS CLI S3 access test...
-aws s3 ls s3://hoda2-ibd-sample-cases-us-west-2 --region us-west-2
-if %errorlevel% neq 0 (
-    echo WARNING: AWS CLI S3 access failed
-) else (
-    echo SUCCESS: AWS CLI S3 access confirmed
-)
-
-echo DEBUG: Python boto3 test...
-echo import boto3; s3=boto3.client('s3',region_name='us-west-2'); print('S3 client created'); s3.head_bucket(Bucket='hoda2-ibd-sample-cases-us-west-2'); print('SUCCESS: boto3 S3 access confirmed') > test_boto3.py
-"%PYTHON_EXE%" test_boto3.py
-if %errorlevel% neq 0 (
-    echo WARNING: Python boto3 S3 access failed - this may cause app issues
-) else (
-    echo SUCCESS: Python boto3 S3 access confirmed
-)
-del test_boto3.py 2>nul
-
-echo TRACE: Starting main app now...
 "%PYTHON_EXE%" ibd_manual_labeling_speedup.py 2>&1
 set "PYTHON_EXIT_CODE=%ERRORLEVEL%"
 echo TRACE: main app exited with %PYTHON_EXIT_CODE%
 
-REM Step 3: Sync completed cases to S3 (runs regardless of main app exit code)
+REM Step 3: Sync completed cases (runs regardless of main app exit code)
 echo.
-echo Step 3: Syncing completed cases to S3...
+echo Step 3: Syncing completed cases...
 echo TRACE: starting completion sync...
 
 REM Check if completion sync script exists
@@ -313,12 +271,11 @@ echo Main app exit code: %PYTHON_EXIT_CODE%
 echo Sync exit code: %SYNC_EXIT_CODE%
 echo ============================================
 
-
 REM Always show completion sync summary before closing
 echo.
 echo COMPLETION SYNC SUMMARY:
 if "%SYNC_EXIT_CODE%"=="0" (
-    echo - All completed cases have been synced to S3
+    echo - All completed cases have been synced successfully
     echo - Check sync_tracking.json in user directory for details
 ) else (
     echo - Some issues occurred during sync (check logs above)
