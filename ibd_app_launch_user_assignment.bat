@@ -194,12 +194,14 @@ REM Step 1: Run data preparation
 echo Step 1: Preparing segmentation data...
 echo TRACE: about to run prep_seg_data.py
 
-REM Check if we should use local mount (for test users)
-if /i "%USERNAME%"=="ImageBuilderTest" (
-    echo Using local mount for test environment
+REM Test S3 access to determine which mode to use
+echo Testing S3 access for prep_seg_data.py mode selection...
+aws s3 ls s3://hoda2-ibd-sample-cases-us-west-2 --region us-west-2 >nul 2>&1
+if %errorlevel% neq 0 (
+    echo S3 access failed - using local mount for data preparation
     "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml --use-local-mount
 ) else (
-    echo Using S3 for production environment  
+    echo S3 access successful - using S3 for data preparation  
     "%PYTHON_EXE%" prep_seg_data.py --parameter_file prep_seg.yaml
 )
 

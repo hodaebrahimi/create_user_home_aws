@@ -448,6 +448,20 @@ def claim_user_folder_mount(mount_path, user_folder, current_username):
         print(f"[X] Error claiming {user_folder} in mount: {e}")
         return False
 
+def ensure_local_taken_by_file(user_folder, current_username):
+    """Ensure the local taken_by.txt file exists with correct format"""
+    try:
+        local_content = f"{user_folder}\n{current_username}\nClaimed at: {datetime.now().isoformat()}"
+        local_taken_by_file = Path(f"C:/AppStreamUsers/{user_folder}/taken_by.txt")
+        local_taken_by_file.parent.mkdir(parents=True, exist_ok=True)
+        local_taken_by_file.write_text(local_content)
+        
+        print(f"[+] Ensured local taken_by.txt exists: {local_taken_by_file}")
+        return True
+    except Exception as e:
+        print(f"[X] Error ensuring local taken_by.txt: {e}")
+        return False
+
 def sync_s3_to_local(bucket_name, s3_client, assigned_user):
     """Sync S3 user folder to local AppStreamUsers directory with enhanced error handling"""
     s3_prefix = f"ibd_root/{assigned_user}/"
@@ -639,51 +653,7 @@ def find_and_assign_user(bucket_name):
     current_username = get_current_username()
     print(f"[*] Current username: {current_username}")
     
-    # Special handling for ImageBuilderTest - use mount-only workflow
-    if current_username == 'imagebuildertest':
-        print("[*] Test environment detected - using mount-only workflow")
-        
-        # Check mount availability
-        mount_path = check_s3_mount_available()
-        if not mount_path:
-            print("[X] Mount not available for test environment")
-            return None
-        
-        # For test environment, first check if user is already assigned
-        print("Scanning mount for available user folders...")
-        user_folders = list_user_folders_mount(mount_path)
-
-        if user_folders:
-            assigned_user = None
-            
-            # First pass: check if current user already has an assignment
-            for user_folder in user_folders:
-                is_taken, taken_by_content = check_user_taken_mount(mount_path, user_folder)
-                
-                if is_taken and taken_by_content:
-                    # Extract username from first line (mount format: username only)
-                    taken_by_user = taken_by_content.split('\n')[0].strip().lower()
-                    if taken_by_user == current_username:
-                        print(f"[+] Found existing assignment: {user_folder} for {current_username}")
-                        assigned_user = user_folder
-                        print(f"[+] Test environment using existing assignment: {assigned_user}")
-                        break
-            
-            # Second pass: if no existing assignment, find available folder
-            if not assigned_user:
-                for user_folder in user_folders:
-                    is_taken, taken_by = check_user_taken_mount(mount_path, user_folder)
-                    
-                    if not is_taken:
-                        print(f"[+] Found available folder: {user_folder}")
-                        if claim_user_folder_mount(mount_path, user_folder, current_username):
-                            assigned_user = user_folder
-                            print(f"[+] Test environment assigned to: {assigned_user}")
-                            break
-        
-        return assigned_user
-    
-    # Production workflow - try S3 first, then mount fallback
+    # Try S3 first, then mount fallback (for ANY user who doesn't have S3 access)
     print("\n" + "-" * 40)
     print("Attempting S3 connection...")
     s3_client = initialize_s3_client(bucket_name)
@@ -706,6 +676,8 @@ def find_and_assign_user(bucket_name):
                     if taken_by_user == current_username:
                         print(f"[+] Found existing assignment: {user_folder} for {current_username}")
                         assigned_user = user_folder
+                        # Ensure local file exists with correct format
+                        ensure_local_taken_by_file(user_folder, current_username)
                         break
             
             # Second pass: if no existing assignment, find available folder
@@ -744,6 +716,8 @@ def find_and_assign_user(bucket_name):
                         if taken_by_user == current_username:
                             print(f"[+] Found existing assignment: {user_folder} for {current_username}")
                             assigned_user = user_folder
+                            # CRITICAL FIX: Ensure local file exists with correct format
+                            ensure_local_taken_by_file(user_folder, current_username)
                             break
                 
                 # Second pass: if no existing assignment, find available folder
@@ -776,7 +750,7 @@ if __name__ == "__main__":
     
     BUCKET_NAME = "hoda2-ibd-sample-cases-us-west-2"
     
-    # Optional comprehensive S3 testing (only for production users)
+    # Optional comprehensive S3 testing (only for users with S3 access)
     test_mode = os.environ.get('RUN_S3_TESTS', '0')
     if test_mode == '1' and current_username != 'imagebuildertest':
         print("\n" + "="*60)
@@ -805,37 +779,23 @@ if __name__ == "__main__":
             
             current_username = get_current_username()
             
-            # Special sync handling for test environment
-            if current_username == 'imagebuildertest':
+            # Determine sync strategy based on S3 access, not username
+            s3_client = initialize_s3_client(BUCKET_NAME)
+            if s3_client is not None:
                 print("\n" + "-" * 40)
-                print("Test environment - syncing from mount only...")
+                print("Syncing from S3...")
+                local_dir = sync_s3_to_local(BUCKET_NAME, s3_client, assigned_user)
+            else:
                 mount_path = check_s3_mount_available()
                 if mount_path:
+                    print("\n" + "-" * 40)
+                    print("Syncing from mount...")
                     source_dir = mount_path / assigned_user
                     local_dir = sync_mount_to_local_from_path(source_dir, assigned_user)
-                    print(f"[+] Test user data synced from mount: {local_dir}")
                 else:
-                    print("[!] Mount not available for test environment")
+                    print("[!] Neither S3 nor mount available - creating empty user dir")
                     local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
                     local_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                # Production sync - try S3 first, then mount fallback
-                s3_client = initialize_s3_client(BUCKET_NAME)
-                if s3_client is not None:
-                    print("\n" + "-" * 40)
-                    print("Syncing from S3...")
-                    local_dir = sync_s3_to_local(BUCKET_NAME, s3_client, assigned_user)
-                else:
-                    mount_path = check_s3_mount_available()
-                    if mount_path:
-                        print("\n" + "-" * 40)
-                        print("Syncing from mount...")
-                        source_dir = mount_path / assigned_user
-                        local_dir = sync_mount_to_local_from_path(source_dir, assigned_user)
-                    else:
-                        print("[!] Neither S3 nor mount available - creating empty user dir")
-                        local_dir = Path(f"C:/AppStreamUsers/{assigned_user}")
-                        local_dir.mkdir(parents=True, exist_ok=True)
             
             # Update configuration
             if update_prep_seg_yaml(assigned_user):
