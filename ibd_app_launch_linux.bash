@@ -4,7 +4,7 @@
 set -e
 
 # === DEBUG SECTION ===
-DEBUG_LOG="/tmp/appstream_debug.log"
+DEBUG_LOG="$HOME/appstream_debug.log"
 echo "DEBUG: Script execution started at $(date)" > "$DEBUG_LOG"
 echo "DEBUG: Current user: $USER" >> "$DEBUG_LOG"
 echo "DEBUG: Current directory: $(pwd)" >> "$DEBUG_LOG"
