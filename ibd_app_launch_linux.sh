@@ -22,6 +22,44 @@ PYTHON_SCRIPT_PATH="/opt/AnnotationApplication/create_user_home_aws/user_assignm
 COMPLETION_SYNC_SCRIPT="/opt/AnnotationApplication/create_user_home_aws/completion_sync.py"
 PYTHON_EXE="python3"  # Use system python3
 
+# === ROLE ASSUMPTION SECTION ===
+echo "Checking AWS environment..."
+
+# Check what account we're in
+CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
+echo "Current AWS Account: $CURRENT_ACCOUNT"
+
+# Only try to assume role if we're in the target account (034039014574)
+# In Image Builder (account 581813859759), skip role assumption
+if [ "$CURRENT_ACCOUNT" = "034039014574" ]; then
+  echo "Attempting to assume ibd-s3-access-iam-role..."
+  
+  assume_role_output=$(aws sts assume-role \
+    --role-arn arn:aws:iam::034039014574:role/ibd-s3-access-iam-role \
+    --role-session-name "appstream-user-$(date +%s)" \
+    2>&1)
+  
+  if [ $? -eq 0 ]; then
+    if command -v jq &> /dev/null; then
+      export AWS_ACCESS_KEY_ID=$(echo "$assume_role_output" | jq -r '.Credentials.AccessKeyId')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$assume_role_output" | jq -r '.Credentials.SecretAccessKey')
+      export AWS_SESSION_TOKEN=$(echo "$assume_role_output" | jq -r '.Credentials.SessionToken')
+    else
+      export AWS_ACCESS_KEY_ID=$(echo "$assume_role_output" | grep -o '"AccessKeyId": "[^"]*"' | cut -d'"' -f4)
+      export AWS_SECRET_ACCESS_KEY=$(echo "$assume_role_output" | grep -o '"SecretAccessKey": "[^"]*"' | cut -d'"' -f4)
+      export AWS_SESSION_TOKEN=$(echo "$assume_role_output" | grep -o '"SessionToken": "[^"]*"' | cut -d'"' -f4)
+    fi
+    echo "✓ Successfully assumed ibd-s3-access-iam-role"
+  else
+    echo "⚠ WARNING: Failed to assume role, using default credentials"
+  fi
+else
+  echo "Skipping role assumption (Image Builder environment)"
+  echo "Role assumption will be performed when deployed to fleet"
+fi
+echo ""
+# === END ROLE ASSUMPTION SECTION ===
+
 # Get the current username
 CURRENT_USER="$USER"
 echo "Current user: $CURRENT_USER"
