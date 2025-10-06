@@ -9,6 +9,10 @@ Syncs completed cases to:
 2. S3 bucket at ibd_root/{user}/ (if available) - SECONDARY
 
 Structure in S3: ibd_root/user1/case_name/
+
+Works with flexible base directories:
+  - /home/appstream (preferred)
+  - /opt/appstream (fallback)
 """
 
 import os
@@ -31,6 +35,24 @@ def get_current_username():
                os.environ.get('APPSTREAM_USER') or
                'unknown_user')
     return username.lower()
+
+def detect_base_directory(user_home_dir):
+    """
+    Detect which base directory we're using based on user_home_dir path
+    Returns: Path object for base directory
+    """
+    user_path = Path(user_home_dir)
+    
+    # Check if we're under /home/appstream
+    if '/home/appstream/' in str(user_path):
+        return Path('/home/appstream')
+    
+    # Check if we're under /opt/appstream
+    if '/opt/appstream/' in str(user_path):
+        return Path('/opt/appstream')
+    
+    # Default to parent of user_home_dir
+    return user_path.parent
 
 def get_assigned_user_from_folder(user_home_dir):
     """
@@ -321,11 +343,14 @@ def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
 
 def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     """Main function to sync all completed cases"""
+    base_dir = detect_base_directory(user_home_dir)
+    
     print("=" * 60)
     print("   IBD CASE COMPLETION SYNC")
     print("=" * 60)
     print(f"User: {assigned_user}")
     print(f"Home Directory: {user_home_dir}")
+    print(f"Base Directory: {base_dir}")
     print(f"S3 Bucket: {bucket_name}")
     print(f"S3 Path: ibd_root/{assigned_user}/")
     print(f"AWS Profile: {AWS_PROFILE}")
@@ -372,7 +397,8 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
         'timestamp': datetime.now().isoformat(),
         'sync_targets': [t[0] for t in sync_targets],
         'total_cases': len(completed_cases),
-        'aws_profile': AWS_PROFILE
+        'aws_profile': AWS_PROFILE,
+        'base_directory': str(base_dir)
     }
     
     # Sync each completed case
@@ -449,6 +475,7 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print("")
     print("=" * 60)
     print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced")
+    print(f"Base Directory: {base_dir}")
     print(f"Targets: {[t[0] for t in sync_targets]}")
     print(f"AWS Profile: {AWS_PROFILE}")
     if s3_client:
@@ -465,6 +492,7 @@ def main():
         print("")
         print(f"AWS Profile: {AWS_PROFILE}")
         print("Note: user_home_dir defaults to USER_HOME_DIR environment variable")
+        print("      Works with both /home/appstream and /opt/appstream")
         sys.exit(1)
     
     bucket_name = sys.argv[1]

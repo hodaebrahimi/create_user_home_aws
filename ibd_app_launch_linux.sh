@@ -23,6 +23,23 @@ COMPLETION_SYNC_SCRIPT="/opt/AnnotationApplication/create_user_home_aws/completi
 PYTHON_EXE="python3"  # Use system python3
 AWS_PROFILE="appstream_machine_role"
 
+# === DETERMINE BASE DIRECTORY ===
+# Try /home/appstream first (preferred), fallback to /opt/appstream
+if [ -d "/home/appstream" ] && [ -w "/home/appstream" ]; then
+    BASE_DIR="/home/appstream"
+    echo "Using base directory: $BASE_DIR (writable home directory)"
+elif [ -d "/opt/appstream" ] && [ -w "/opt/appstream" ]; then
+    BASE_DIR="/opt/appstream"
+    echo "Using base directory: $BASE_DIR (fallback location)"
+else
+    echo "ERROR: Neither /home/appstream nor /opt/appstream is available and writable"
+    read -p "Press Enter to exit..."
+    exit 1
+fi
+echo "Base directory: $BASE_DIR"
+echo ""
+# === END BASE DIRECTORY DETECTION ===
+
 # === AWS PROFILE SETUP SECTION ===
 echo "Setting up AWS profile..."
 export AWS_PROFILE="$AWS_PROFILE"
@@ -87,32 +104,52 @@ echo ""
 echo "Running hybrid user assignment system..."
 echo "Bucket: $BUCKET_NAME"
 echo "AWS Profile: $AWS_PROFILE"
+echo "Base Directory: $BASE_DIR"
 echo ""
 
-# Test S3 access first with profile
+# Test S3 access - try with profile first, fall back to default credentials
 echo "Testing S3 bucket access..."
-if ! aws s3 ls s3://$BUCKET_NAME/ --profile "$AWS_PROFILE" > /dev/null 2>&1; then
-    echo ""
-    echo "ERROR: Cannot access S3 bucket: $BUCKET_NAME"
-    echo ""
-    echo "This usually means:"
-    echo "1. AWS profile '$AWS_PROFILE' is not configured"
-    echo "2. Profile lacks S3 permissions"
-    echo "3. Bucket name is incorrect or in wrong region"
-    echo ""
-    echo "To fix:"
-    echo "- Ensure AWS profile '$AWS_PROFILE' is configured"
-    echo "- Verify profile has S3 permissions"
-    echo "- Verify bucket exists in us-west-2 region"
-    echo ""
-    read -p "Press Enter to exit..."
-    exit 1
+TEST_OUTPUT=$(aws s3 ls s3://$BUCKET_NAME/ --profile "$AWS_PROFILE" 2>&1)
+TEST_EXIT=$?
+
+if [ $TEST_EXIT -ne 0 ]; then
+    # Profile test failed, check if it's a profile issue or S3 issue
+    if echo "$TEST_OUTPUT" | grep -q "could not be found\|profile.*not found"; then
+        echo "⚠ AWS profile '$AWS_PROFILE' not found, trying default credentials..."
+        # Try without profile
+        if aws s3 ls s3://$BUCKET_NAME/ > /dev/null 2>&1; then
+            echo "✓ S3 bucket access confirmed using default credentials"
+            echo "Note: Python scripts will still attempt to use profile '$AWS_PROFILE'"
+        else
+            echo ""
+            echo "ERROR: Cannot access S3 bucket: $BUCKET_NAME"
+            echo ""
+            echo "This usually means:"
+            echo "1. No AWS credentials available (profile or IAM role)"
+            echo "2. Insufficient S3 permissions"
+            echo "3. Bucket name is incorrect or in wrong region"
+            echo ""
+            read -p "Press Enter to exit..."
+            exit 1
+        fi
+    else
+        echo ""
+        echo "ERROR: Cannot access S3 bucket: $BUCKET_NAME"
+        echo "Error details: $TEST_OUTPUT"
+        echo ""
+        read -p "Press Enter to exit..."
+        exit 1
+    fi
+else
+    echo "✓ S3 bucket access confirmed with profile: $AWS_PROFILE"
 fi
-echo "✓ S3 bucket access confirmed"
 echo ""
 
 echo "Running Python script: $PYTHON_SCRIPT_PATH"
 echo "Using Python executable: $PYTHON_EXE"
+
+# Pass BASE_DIR to Python script via environment
+export BASE_DIR="$BASE_DIR"
 
 # Run the user assignment script and capture output
 TEMP_OUTPUT=$(mktemp)
@@ -148,8 +185,8 @@ if [ -z "$ASSIGNED_USER" ]; then
     exit 1
 fi
 
-# Set the user home directory based on assigned user
-USER_HOME="/home/appstream/$ASSIGNED_USER"
+# Set the user home directory based on assigned user and BASE_DIR
+USER_HOME="$BASE_DIR/$ASSIGNED_USER"
 
 # Create the user home directory if it doesn't exist
 if [ ! -d "$USER_HOME" ]; then
@@ -332,6 +369,7 @@ if [ "$PYTHON_EXIT_CODE" -eq 0 ] && [ "$SYNC_EXIT_CODE" -eq 0 ]; then
     echo "IBD Annotator completed successfully!"
     echo "User: $ASSIGNED_USER"
     echo "User data available in: $USER_HOME"
+    echo "Base directory: $BASE_DIR"
     echo "S3 bucket: $BUCKET_NAME"
     echo "AWS Profile: $AWS_PROFILE"
     echo "Main app exit code: $PYTHON_EXIT_CODE"
@@ -362,6 +400,7 @@ else
     echo ""
     echo "Assigned user: $ASSIGNED_USER"
     echo "User home directory: $USER_HOME"
+    echo "Base directory: $BASE_DIR"
     echo "S3 bucket: $BUCKET_NAME"
     echo "AWS Profile: $AWS_PROFILE"
     echo "Main app exit code: $PYTHON_EXIT_CODE"
