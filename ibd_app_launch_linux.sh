@@ -21,44 +21,24 @@ BUCKET_NAME="hoda2-ibd-sample-cases-us-west-2"
 PYTHON_SCRIPT_PATH="/opt/AnnotationApplication/create_user_home_aws/user_assignment_script.py"
 COMPLETION_SYNC_SCRIPT="/opt/AnnotationApplication/create_user_home_aws/completion_sync.py"
 PYTHON_EXE="python3"  # Use system python3
+AWS_PROFILE="appstream_machine_role"
 
-# === ROLE ASSUMPTION SECTION ===
-echo "Checking AWS environment..."
+# === AWS PROFILE SETUP SECTION ===
+echo "Setting up AWS profile..."
+export AWS_PROFILE="$AWS_PROFILE"
+export AWS_DEFAULT_REGION="us-west-2"
 
-# Check what account we're in
-CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
-echo "Current AWS Account: $CURRENT_ACCOUNT"
+echo "Using AWS profile: $AWS_PROFILE"
+echo "AWS region: $AWS_DEFAULT_REGION"
 
-# Only try to assume role if we're in the target account (034039014574)
-# In Image Builder (account 581813859759), skip role assumption
-if [ "$CURRENT_ACCOUNT" = "034039014574" ]; then
-  echo "Attempting to assume ibd-s3-access-iam-role..."
-  
-  assume_role_output=$(aws sts assume-role \
-    --role-arn arn:aws:iam::034039014574:role/ibd-s3-access-iam-role \
-    --role-session-name "appstream-user-$(date +%s)" \
-    2>&1)
-  
-  if [ $? -eq 0 ]; then
-    if command -v jq &> /dev/null; then
-      export AWS_ACCESS_KEY_ID=$(echo "$assume_role_output" | jq -r '.Credentials.AccessKeyId')
-      export AWS_SECRET_ACCESS_KEY=$(echo "$assume_role_output" | jq -r '.Credentials.SecretAccessKey')
-      export AWS_SESSION_TOKEN=$(echo "$assume_role_output" | jq -r '.Credentials.SessionToken')
-    else
-      export AWS_ACCESS_KEY_ID=$(echo "$assume_role_output" | grep -o '"AccessKeyId": "[^"]*"' | cut -d'"' -f4)
-      export AWS_SECRET_ACCESS_KEY=$(echo "$assume_role_output" | grep -o '"SecretAccessKey": "[^"]*"' | cut -d'"' -f4)
-      export AWS_SESSION_TOKEN=$(echo "$assume_role_output" | grep -o '"SessionToken": "[^"]*"' | cut -d'"' -f4)
-    fi
-    echo "✓ Successfully assumed ibd-s3-access-iam-role"
-  else
-    echo "⚠ WARNING: Failed to assume role, using default credentials"
-  fi
-else
-  echo "Skipping role assumption (Image Builder environment)"
-  echo "Role assumption will be performed when deployed to fleet"
+# Test AWS CLI access with profile
+if ! aws s3 ls --profile "$AWS_PROFILE" > /dev/null 2>&1; then
+    echo "⚠ WARNING: AWS profile '$AWS_PROFILE' not configured or inaccessible"
+    echo "Attempting to continue with default credentials..."
 fi
+
 echo ""
-# === END ROLE ASSUMPTION SECTION ===
+# === END AWS PROFILE SETUP SECTION ===
 
 # Get the current username
 CURRENT_USER="$USER"
@@ -106,25 +86,23 @@ sleep 3
 echo ""
 echo "Running hybrid user assignment system..."
 echo "Bucket: $BUCKET_NAME"
+echo "AWS Profile: $AWS_PROFILE"
 echo ""
 
-# Set AWS region
-export AWS_DEFAULT_REGION="us-west-2"
-
-# Test S3 access first
+# Test S3 access first with profile
 echo "Testing S3 bucket access..."
-if ! aws s3 ls s3://$BUCKET_NAME/ > /dev/null 2>&1; then
+if ! aws s3 ls s3://$BUCKET_NAME/ --profile "$AWS_PROFILE" > /dev/null 2>&1; then
     echo ""
     echo "ERROR: Cannot access S3 bucket: $BUCKET_NAME"
     echo ""
     echo "This usually means:"
-    echo "1. IAM role is NOT attached to the AppStream FLEET"
-    echo "2. IAM role lacks S3 permissions"
+    echo "1. AWS profile '$AWS_PROFILE' is not configured"
+    echo "2. Profile lacks S3 permissions"
     echo "3. Bucket name is incorrect or in wrong region"
     echo ""
     echo "To fix:"
-    echo "- Go to AppStream Console → Fleets → [Your Fleet] → Edit"
-    echo "- Ensure IAM Role is set with S3 permissions"
+    echo "- Ensure AWS profile '$AWS_PROFILE' is configured"
+    echo "- Verify profile has S3 permissions"
     echo "- Verify bucket exists in us-west-2 region"
     echo ""
     read -p "Press Enter to exit..."
@@ -327,6 +305,7 @@ if [ "$PYTHON_EXIT_CODE" -eq 0 ] && [ "$SYNC_EXIT_CODE" -eq 0 ]; then
     echo "User: $ASSIGNED_USER"
     echo "User data available in: $USER_HOME"
     echo "S3 bucket: $BUCKET_NAME"
+    echo "AWS Profile: $AWS_PROFILE"
     echo "Main app exit code: $PYTHON_EXIT_CODE"
     echo "Sync exit code: $SYNC_EXIT_CODE"
     echo "============================================"
@@ -347,8 +326,8 @@ else
     echo "An error occurred during execution."
     echo ""
     echo "Troubleshooting steps:"
-    echo "1. Check AWS credentials are configured"
-    echo "2. Verify S3 bucket permissions"
+    echo "1. Check AWS profile '$AWS_PROFILE' is configured"
+    echo "2. Verify S3 bucket permissions for profile"
     echo "3. Ensure all required files are present"
     echo "4. Check Python environment setup"
     echo "5. Verify user assignment script is working"
@@ -356,6 +335,7 @@ else
     echo "Assigned user: $ASSIGNED_USER"
     echo "User home directory: $USER_HOME"
     echo "S3 bucket: $BUCKET_NAME"
+    echo "AWS Profile: $AWS_PROFILE"
     echo "Main app exit code: $PYTHON_EXIT_CODE"
     echo "Sync exit code: $SYNC_EXIT_CODE"
     echo "============================================"

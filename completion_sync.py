@@ -2,6 +2,8 @@
 """
 IBD Case Completion Sync Script for Linux/AppStream
 
+Uses AWS profile 'appstream_machine_role' for S3 operations
+
 Syncs completed cases to:
 1. ~/MyFiles/HomeFolder/ (AppStream persistent storage) - PRIMARY
 2. S3 bucket at ibd_root/{user}/ (if available) - SECONDARY
@@ -18,6 +20,9 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import fnmatch
+
+# AWS Profile configuration
+AWS_PROFILE = 'appstream_machine_role'
 
 def get_current_username():
     """Get the current username from various sources"""
@@ -66,11 +71,14 @@ def check_appstream_persistent_storage():
     return None
 
 def initialize_s3_client_for_sync(bucket_name):
-    """Initialize S3 client specifically for sync operations"""
+    """Initialize S3 client using AWS profile for sync operations"""
     try:
-        print("[*] Initializing S3 client for completion sync...")
+        print(f"[*] Initializing S3 client with AWS profile: {AWS_PROFILE}")
         region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
-        s3_client = boto3.client('s3', region_name=region)
+        
+        # Create boto3 session with profile
+        session = boto3.Session(profile_name=AWS_PROFILE, region_name=region)
+        s3_client = session.client('s3')
         
         # Quick connection test
         s3_client.head_bucket(Bucket=bucket_name)
@@ -82,10 +90,13 @@ def initialize_s3_client_for_sync(bucket_name):
         print(f"[!] S3 client initialization failed: {error_code}")
         return None
     except NoCredentialsError:
-        print("[!] No AWS credentials found")
+        print(f"[!] No AWS credentials found for profile: {AWS_PROFILE}")
         return None
     except Exception as e:
-        print(f"[!] S3 connection failed: {e}")
+        if 'could not be found' in str(e).lower():
+            print(f"[!] AWS profile '{AWS_PROFILE}' not found")
+        else:
+            print(f"[!] S3 connection failed: {e}")
         return None
 
 def find_completed_cases(user_home_dir):
@@ -317,6 +328,7 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print(f"Home Directory: {user_home_dir}")
     print(f"S3 Bucket: {bucket_name}")
     print(f"S3 Path: ibd_root/{assigned_user}/")
+    print(f"AWS Profile: {AWS_PROFILE}")
     print("")
     
     # Find completed cases first
@@ -359,7 +371,8 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     session_info = {
         'timestamp': datetime.now().isoformat(),
         'sync_targets': [t[0] for t in sync_targets],
-        'total_cases': len(completed_cases)
+        'total_cases': len(completed_cases),
+        'aws_profile': AWS_PROFILE
     }
     
     # Sync each completed case
@@ -437,6 +450,7 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print("=" * 60)
     print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced")
     print(f"Targets: {[t[0] for t in sync_targets]}")
+    print(f"AWS Profile: {AWS_PROFILE}")
     if s3_client:
         print(f"S3 Path: s3://{bucket_name}/ibd_root/{assigned_user}/")
     print("=" * 60)
@@ -449,6 +463,7 @@ def main():
         print("Usage: python completion_sync.py <bucket_name> [user_home_dir]")
         print("Example: python completion_sync.py my-bucket /home/appstream/user1")
         print("")
+        print(f"AWS Profile: {AWS_PROFILE}")
         print("Note: user_home_dir defaults to USER_HOME_DIR environment variable")
         sys.exit(1)
     
@@ -465,6 +480,7 @@ def main():
             sys.exit(1)
     
     print(f"[*] User home directory: {user_home_dir}")
+    print(f"[*] AWS Profile: {AWS_PROFILE}")
     
     # Read the assigned username from the local assignment file
     assigned_username, user_folder = get_assigned_user_from_folder(user_home_dir)

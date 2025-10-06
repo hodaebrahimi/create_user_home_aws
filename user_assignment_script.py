@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 S3-based user assignment for AppStream 2.0 (Linux)
-Uses IAM role credentials (no hardcoded credentials needed)
+Uses AWS profile 'appstream_machine_role' for credentials
 Stores data in Linux paths (/home/appstream/)
 Uses ibd_root/ as parent directory for user folders
 """
@@ -14,6 +14,9 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
+# AWS Profile configuration
+AWS_PROFILE = 'appstream_machine_role'
+
 def get_current_username():
     """Get the current username from various sources"""
     username = (os.environ.get('USERNAME') or 
@@ -24,15 +27,16 @@ def get_current_username():
 
 def initialize_s3_client(bucket_name, region='us-west-2'):
     """
-    Initialize S3 client and test connectivity using IAM role
+    Initialize S3 client using AWS profile
     Returns: (s3_client or None, success: bool)
     """
     try:
-        print("[*] Initializing S3 client with IAM role credentials...")
+        print(f"[*] Initializing S3 client with AWS profile: {AWS_PROFILE}")
         print(f"[*] Using AWS region: {region}")
         
-        # Create S3 client - will automatically use IAM role in AppStream
-        s3_client = boto3.client('s3', region_name=region)
+        # Create boto3 session with profile
+        session = boto3.Session(profile_name=AWS_PROFILE, region_name=region)
+        s3_client = session.client('s3')
         
         # Test basic S3 connection
         print("[*] Testing S3 connection...")
@@ -42,11 +46,11 @@ def initialize_s3_client(bucket_name, region='us-west-2'):
         return s3_client, True
             
     except NoCredentialsError:
-        print("[X] No AWS credentials found")
-        print("[!] IAM role may not be attached to AppStream fleet")
-        print("[!] Required: AppStream Fleet → Edit → IAM Role with S3 permissions")
+        print(f"[X] No AWS credentials found for profile: {AWS_PROFILE}")
+        print("[!] AWS profile may not be configured")
+        print(f"[!] Run: aws configure --profile {AWS_PROFILE}")
         return None, False
-        
+    
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_msg = e.response['Error']['Message']
@@ -54,7 +58,7 @@ def initialize_s3_client(bucket_name, region='us-west-2'):
         print(f"[X] S3 client initialization failed: {error_code}")
         
         if error_code == '403' or error_code == 'Forbidden' or error_code == 'AccessDenied':
-            print("[!] Access denied - IAM role lacks S3 permissions")
+            print(f"[!] Access denied - profile '{AWS_PROFILE}' lacks S3 permissions")
             print("[!] Required permissions:")
             print("    - s3:ListBucket on bucket")
             print("    - s3:GetObject, s3:PutObject on bucket objects")
@@ -65,9 +69,14 @@ def initialize_s3_client(bucket_name, region='us-west-2'):
             print(f"[!] Error: {error_msg}")
         
         return None, False
-        
+    
     except Exception as e:
-        print(f"[X] S3 connection failed: {e}")
+        # Check if it's a profile not found error
+        if 'could not be found' in str(e).lower():
+            print(f"[X] AWS profile '{AWS_PROFILE}' not found")
+            print(f"[!] Configure the profile with: aws configure --profile {AWS_PROFILE}")
+        else:
+            print(f"[X] S3 connection failed: {e}")
         return None, False
 
 def list_user_folders_s3(bucket_name, s3_client):
@@ -216,11 +225,17 @@ def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
         
         print(f"[+] Successfully assigned {username} → {user_folder} in S3")
         
-        # Also create local tracking file
-        local_assignment_file = Path(f"/home/appstream/{user_folder}/assignment_info.txt")
-        local_assignment_file.parent.mkdir(parents=True, exist_ok=True)
-        local_assignment_file.write_text(assignment_content)
-        print(f"[+] Created local assignment file: {local_assignment_file}")
+        # Try to create local tracking file (may fail in Image Builder, that's OK)
+        try:
+            local_assignment_file = Path(f"/home/appstream/{user_folder}/assignment_info.txt")
+            local_assignment_file.parent.mkdir(parents=True, exist_ok=True)
+            local_assignment_file.write_text(assignment_content)
+            print(f"[+] Created local assignment file: {local_assignment_file}")
+        except PermissionError:
+            print(f"[!] Cannot create local assignment file (permission denied)")
+            print(f"[*] This is expected in Image Builder - file will be created when deployed")
+        except Exception as local_err:
+            print(f"[!] Could not create local assignment file: {local_err}")
         
         return True
         
@@ -228,12 +243,12 @@ def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
         error_code = e.response['Error']['Code']
         if error_code == 'AccessDenied':
             print(f"[X] Access denied assigning {user_folder}")
-            print("[!] IAM role needs s3:PutObject permission")
+            print("[!] AWS profile needs s3:PutObject permission")
         else:
             print(f"[X] Error assigning {user_folder} in S3: {error_code}")
         return False
     except Exception as e:
-        print(f"[X] Error during assignment: {e}")
+        print(f"[X] Error during S3 assignment: {e}")
         return False
 
 def ensure_local_assignment_file(user_folder, username):
@@ -245,9 +260,13 @@ def ensure_local_assignment_file(user_folder, username):
         local_assignment_file.write_text(assignment_content)
         print(f"[+] Ensured local assignment file exists: {local_assignment_file}")
         return True
+    except PermissionError:
+        print(f"[!] Cannot create local assignment file (permission denied)")
+        print(f"[*] This is expected in Image Builder - file will be created when deployed")
+        return True  # Not a critical failure
     except Exception as e:
         print(f"[!] Warning: Could not create local assignment file: {e}")
-        return False
+        return True  # Not a critical failure
 
 def sync_s3_to_local(bucket_name, s3_client, assigned_user):
     """
@@ -326,7 +345,7 @@ def find_and_assign_user(bucket_name, region='us-west-2'):
     Returns: assigned_user_folder or None
     """
     print("=" * 60)
-    print("   S3 USER ASSIGNMENT SYSTEM (AppStream IAM Role)")
+    print(f"   S3 USER ASSIGNMENT (AWS Profile: {AWS_PROFILE})")
     print("=" * 60)
     print(f"Target bucket: {bucket_name}")
     print(f"Region: {region}")
@@ -404,6 +423,7 @@ def main():
     
     current_username = get_current_username()
     print(f"[DEBUG] Detected username: '{current_username}'")
+    print(f"[DEBUG] Using AWS profile: '{AWS_PROFILE}'")
     print("")
     
     try:
