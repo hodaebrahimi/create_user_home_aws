@@ -269,7 +269,35 @@ else
     echo "TRACE: launching main app..."
     
     set +e  # Don't exit on error
-    "$PYTHON_EXE" ibd_manual_labeling_speedup.py 2>&1
+    "$PYTHON_EXE" ibd_manual_labeling_speedup.py > /tmp/gradio_output.log 2>&1 &
+    GRADIO_PID=$!
+    
+    # Give Gradio time to start
+    echo "Waiting for Gradio interface to start..."
+    sleep 5
+    
+    # Find Chrome executable
+    if command -v google-chrome &> /dev/null; then
+        CHROME_CMD="google-chrome"
+    elif command -v chrome &> /dev/null; then
+        CHROME_CMD="chrome"
+    elif command -v chromium &> /dev/null; then
+        CHROME_CMD="chromium"
+    else
+        echo "WARNING: Chrome not found"
+        CHROME_CMD=""
+    fi
+    
+    # Open browser to Gradio (default port 7860)
+    if [ -n "$CHROME_CMD" ]; then
+        echo "Opening Chrome at http://127.0.0.1:7860"
+        $CHROME_CMD --new-window http://127.0.0.1:7860 &
+    else
+        echo "Please open http://127.0.0.1:7860 manually in your browser"
+    fi
+    
+    # Wait for Gradio to finish
+    wait $GRADIO_PID
     PYTHON_EXIT_CODE=$?
     set -e
     
