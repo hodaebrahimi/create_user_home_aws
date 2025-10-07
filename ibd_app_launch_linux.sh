@@ -24,15 +24,23 @@ PYTHON_EXE="python3"  # Use system python3
 AWS_PROFILE="appstream_machine_role"
 
 # === DETERMINE BASE DIRECTORY ===
-# Try /home/appstream first (preferred), fallback to /opt/appstream
-if [ -d "/home/appstream" ] && [ -w "/home/appstream" ]; then
-    BASE_DIR="/home/appstream"
-    echo "Using base directory: $BASE_DIR (writable home directory)"
+# Strategy:
+# 1. Try ~/MyFiles/HomeFolder first (AppStream persistent - auto-syncs to S3)
+# 2. Fall back to /opt/appstream (temporary - requires manual S3 sync at end)
+# We NEVER use /home/appstream
+HOMEFOLDER_PATH="$HOME/MyFiles/HomeFolder"
+
+if [ -d "$HOMEFOLDER_PATH" ]; then
+    BASE_DIR="$HOMEFOLDER_PATH"
+    echo "Using AppStream persistent storage: $BASE_DIR"
+    echo "This location auto-syncs to S3 - no manual sync needed"
 elif [ -d "/opt/appstream" ] && [ -w "/opt/appstream" ]; then
     BASE_DIR="/opt/appstream"
-    echo "Using base directory: $BASE_DIR (fallback location)"
+    echo "HomeFolder not available, using fallback: $BASE_DIR"
+    echo "This is temporary storage - will sync to S3 at end"
+    mkdir -p "$BASE_DIR" 2>/dev/null || true
 else
-    echo "ERROR: Neither /home/appstream nor /opt/appstream is available and writable"
+    echo "ERROR: Neither ~/MyFiles/HomeFolder nor /opt/appstream is available"
     read -p "Press Enter to exit..."
     exit 1
 fi
@@ -87,7 +95,7 @@ fi
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
-if pip3 install -r /opt/AnnotationApplication/ibd_labeling_local_1-main/requirements.txt &> /dev/null; then
+if pip3 install -r /opt/AnnotationApplication/ibd_labeling_local_1/requirements.txt &> /dev/null; then
     echo "Dependencies installed successfully"
 else
     echo "WARNING: Some dependencies may not have installed correctly"
@@ -225,7 +233,7 @@ fi
 # Change to application directory
 echo ""
 echo "Changing to application directory..."
-APP_DIR="/opt/AnnotationApplication/ibd_labeling_local_1-main"
+APP_DIR="/opt/AnnotationApplication/ibd_labeling_local_1"
 
 if ! cd "$APP_DIR" 2>/dev/null; then
     echo "ERROR: Could not change to application directory $APP_DIR"
@@ -276,7 +284,8 @@ export USER_OUTPUT_DIR="$USER_HOME"
 
 # Let prep_seg_data.py handle S3 vs mount detection automatically
 set +e  # Don't exit on error for this section
-"$PYTHON_EXE" prep_seg_data.py --parameter_file prep_seg.yaml --use-local-mount
+# CORRECT - use S3 direct access
+"$PYTHON_EXE" prep_seg_data.py --parameter_file prep_seg.yaml
 PREP_EXIT=$?
 set -e
 

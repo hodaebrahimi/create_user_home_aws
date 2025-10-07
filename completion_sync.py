@@ -43,11 +43,12 @@ def detect_base_directory(user_home_dir):
     """
     user_path = Path(user_home_dir)
     
-    # Check if we're under /home/appstream
-    if '/home/appstream/' in str(user_path):
-        return Path('/home/appstream')
+    # Check if we're under ~/MyFiles/HomeFolder (AppStream persistent storage)
+    homefolder_base = Path.home() / "MyFiles" / "HomeFolder"
+    if str(user_path).startswith(str(homefolder_base)):
+        return homefolder_base
     
-    # Check if we're under /opt/appstream
+    # Check if we're under /opt/appstream (temporary fallback)
     if '/opt/appstream/' in str(user_path):
         return Path('/opt/appstream')
     
@@ -80,17 +81,6 @@ def get_assigned_user_from_folder(user_home_dir):
     
     return None, None
 
-def check_appstream_persistent_storage():
-    """Check if AppStream persistent storage is available"""
-    # AppStream persistent storage location
-    persistent_path = Path.home() / "MyFiles" / "HomeFolder"
-    
-    if persistent_path.exists() and persistent_path.is_dir():
-        print(f"[+] AppStream persistent storage available at: {persistent_path}")
-        return persistent_path
-    
-    print(f"[!] AppStream persistent storage not available at: {persistent_path}")
-    return None
 
 def initialize_s3_client_for_sync(bucket_name):
     """Initialize S3 client using AWS profile for sync operations"""
@@ -356,34 +346,42 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print(f"AWS Profile: {AWS_PROFILE}")
     print("")
     
+    # Check if we're running from HomeFolder (AppStream persistent storage)
+    homefolder_path = Path.home() / "MyFiles" / "HomeFolder"
+    running_from_homefolder = str(base_dir).startswith(str(homefolder_path))
+    
+    if running_from_homefolder:
+        print("[*] Running from AppStream persistent storage (~/MyFiles/HomeFolder)")
+        print("[*] HomeFolder automatically syncs to S3")
+        print("[+] No manual sync needed - skipping all sync operations")
+        print("")
+        print("=" * 60)
+        print("SYNC SKIPPED: Using persistent storage with automatic S3 sync")
+        print("=" * 60)
+        return True  # Return success since no sync is needed
+    
+    # Not in HomeFolder - we're using /opt/appstream fallback
+    print("[*] Running from temporary storage (/opt/appstream)")
+    print("[*] Will sync completed cases to S3")
+    print("")
+    
     # Find completed cases first
     completed_cases = find_completed_cases(user_home_dir)
     if not completed_cases:
         print("[*] No completed cases found - nothing to sync")
         return True
     
-    # Check sync targets (priority order)
-    print("[*] Checking sync targets...")
-    
-    # 1. AppStream persistent storage (PRIMARY)
-    persistent_path = check_appstream_persistent_storage()
-    
-    # 2. S3 (SECONDARY)
+    # Initialize S3 client for sync (ONLY sync target when using /opt/appstream)
     s3_client = initialize_s3_client_for_sync(bucket_name)
     
-    # Determine sync strategy
-    sync_targets = []
-    if persistent_path:
-        sync_targets.append(('persistent', persistent_path))
-    if s3_client:
-        sync_targets.append(('s3', s3_client))
-    
-    if not sync_targets:
-        print("[!] No sync targets available")
+    if not s3_client:
+        print("[!] S3 not available - cannot sync from temporary storage")
         print("[!] Completed cases remain in local directory only")
+        print("[!] WARNING: Data may be lost when AppStream session ends")
         return False
     
-    print(f"[*] Active sync targets: {[t[0] for t in sync_targets]}")
+    print("[*] S3 sync enabled")
+    sync_targets = [('s3', s3_client)]
     
     # Load sync tracking
     sync_tracking_file = get_sync_tracking_file(user_home_dir)
@@ -395,10 +393,11 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     
     session_info = {
         'timestamp': datetime.now().isoformat(),
-        'sync_targets': [t[0] for t in sync_targets],
+        'sync_targets': ['s3'],
         'total_cases': len(completed_cases),
         'aws_profile': AWS_PROFILE,
-        'base_directory': str(base_dir)
+        'base_directory': str(base_dir),
+        'storage_mode': 'temporary_with_s3_sync'
     }
     
     # Sync each completed case
@@ -414,45 +413,25 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
         
         last_synced = sync_tracking.get(case_name, {}).get('last_synced_timestamp', 0)
         
-        # Check for existing sync flags
-        persistent_sync_flag = case_dir / "02_synced_to_persistent.txt"
+        # Check for existing sync flag
         s3_sync_flag = case_dir / "02_synced_to_s3.txt"
         
-        if completion_time <= last_synced and persistent_sync_flag.exists():
-            print(f"  [=] Case {case_name} already synced to persistent storage")
+        if completion_time <= last_synced and s3_sync_flag.exists():
+            print(f"  [=] Case {case_name} already synced to S3")
             continue
         
-        # Sync the case to all available targets
+        # Sync the case to S3
         print(f"  [*] Syncing case {synced_cases + 1}/{total_cases}: {case_name}")
         
-        sync_results = {}
-        
-        for sync_type, sync_target in sync_targets:
-            if sync_type == 'persistent':
-                if sync_case_to_persistent_storage(sync_target, assigned_user, case_dir):
-                    persistent_sync_flag.write_text(
-                        f"Synced to persistent storage at {datetime.now().isoformat()}"
-                    )
-                    sync_results['persistent'] = True
-                else:
-                    sync_results['persistent'] = False
-                    
-            elif sync_type == 's3':
-                if sync_case_to_s3(sync_target, bucket_name, assigned_user, case_dir):
-                    s3_sync_flag.write_text(
-                        f"Synced to S3 (ibd_root/{assigned_user}/) at {datetime.now().isoformat()}"
-                    )
-                    sync_results['s3'] = True
-                else:
-                    sync_results['s3'] = False
-        
-        # Consider sync successful if ANY target succeeded
-        if any(sync_results.values()):
+        if sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
+            s3_sync_flag.write_text(
+                f"Synced to S3 (ibd_root/{assigned_user}/) at {datetime.now().isoformat()}"
+            )
             sync_tracking[case_name] = {
                 'last_synced_timestamp': datetime.now().timestamp(),
                 'last_synced_iso': datetime.now().isoformat(),
                 'sync_successful': True,
-                'sync_targets': sync_results
+                'sync_target': 's3'
             }
             synced_cases += 1
         else:
@@ -460,26 +439,24 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
                 'last_synced_timestamp': sync_tracking.get(case_name, {}).get('last_synced_timestamp', 0),
                 'last_attempted_iso': datetime.now().isoformat(),
                 'sync_successful': False,
-                'sync_targets': sync_results
+                'sync_target': 's3'
             }
     
     # Update session info
     session_info['synced_cases'] = synced_cases
     session_info['failed_cases'] = total_cases - synced_cases
     sync_tracking['sync_sessions'].append(session_info)
-    sync_tracking['last_sync_targets'] = [t[0] for t in sync_targets]
+    sync_tracking['last_sync_targets'] = ['s3']
     
     # Save tracking information
     save_sync_tracking(sync_tracking_file, sync_tracking)
     
     print("")
     print("=" * 60)
-    print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced")
-    print(f"Base Directory: {base_dir}")
-    print(f"Targets: {[t[0] for t in sync_targets]}")
+    print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced to S3")
+    print(f"Base Directory: {base_dir} (temporary)")
+    print(f"S3 Path: s3://{bucket_name}/ibd_root/{assigned_user}/")
     print(f"AWS Profile: {AWS_PROFILE}")
-    if s3_client:
-        print(f"S3 Path: s3://{bucket_name}/ibd_root/{assigned_user}/")
     print("=" * 60)
     
     return synced_cases > 0 or total_cases == 0

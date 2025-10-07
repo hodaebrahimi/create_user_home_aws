@@ -203,7 +203,7 @@ def get_all_assignments_s3(bucket_name, s3_client):
         print(f"[!] Error checking assignments: {e}")
         return {}
 
-def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
+def assign_user_folder_s3(bucket_name, s3_client, username, user_folder, base_dir):
     """
     Assign a user folder to username by creating assignment file IN the user folder
     Returns: success: bool
@@ -214,7 +214,7 @@ def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
         # Create assignment content
         assignment_content = f"{user_folder}\n{username}\nAssigned at: {datetime.now().isoformat()}"
         
-        # Write assignment to user folder (NOT to user_assignments/)
+        # Write assignment to S3
         assignment_key = f"ibd_root/{user_folder}/assignment_info.txt"
         s3_client.put_object(
             Bucket=bucket_name,
@@ -227,7 +227,7 @@ def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
         
         # Try to create local tracking file (may fail in Image Builder, that's OK)
         try:
-            local_assignment_file = Path(f"/home/appstream/{user_folder}/assignment_info.txt")
+            local_assignment_file = base_dir / user_folder / "assignment_info.txt"
             local_assignment_file.parent.mkdir(parents=True, exist_ok=True)
             local_assignment_file.write_text(assignment_content)
             print(f"[+] Created local assignment file: {local_assignment_file}")
@@ -241,21 +241,17 @@ def assign_user_folder_s3(bucket_name, s3_client, username, user_folder):
         
     except ClientError as e:
         error_code = e.response['Error']['Code']
-        if error_code == 'AccessDenied':
-            print(f"[X] Access denied assigning {user_folder}")
-            print("[!] AWS profile needs s3:PutObject permission")
-        else:
-            print(f"[X] Error assigning {user_folder} in S3: {error_code}")
+        print(f"[X] Failed to create assignment in S3: {error_code}")
         return False
     except Exception as e:
-        print(f"[X] Error during S3 assignment: {e}")
+        print(f"[X] Error assigning user folder: {e}")
         return False
-
-def ensure_local_assignment_file(user_folder, username):
+        
+def ensure_local_assignment_file(user_folder, username, base_dir):
     """Ensure the local assignment file exists"""
     try:
         assignment_content = f"{user_folder}\n{username}\nVerified at: {datetime.now().isoformat()}"
-        local_assignment_file = Path(f"/home/appstream/{user_folder}/assignment_info.txt")
+        local_assignment_file = base_dir / user_folder / "assignment_info.txt"  # ✅ Uses base_dir parameter
         local_assignment_file.parent.mkdir(parents=True, exist_ok=True)
         local_assignment_file.write_text(assignment_content)
         print(f"[+] Ensured local assignment file exists: {local_assignment_file}")
@@ -268,13 +264,13 @@ def ensure_local_assignment_file(user_folder, username):
         print(f"[!] Warning: Could not create local assignment file: {e}")
         return True  # Not a critical failure
 
-def sync_s3_to_local(bucket_name, s3_client, assigned_user):
+def sync_s3_to_local(bucket_name, s3_client, assigned_user, base_dir):
     """
     Sync S3 user folder to local directory
-    Downloads all files from s3://bucket/ibd_root/userN/ to /home/appstream/userN/
+    Downloads all files from s3://bucket/ibd_root/userN/ to {base_dir}/userN/
     """
     s3_prefix = f"ibd_root/{assigned_user}/"
-    local_dir = Path(f"/home/appstream/{assigned_user}")
+    local_dir = base_dir / assigned_user
     
     try:
         print(f"[*] Syncing S3 folder to local: {local_dir}")
@@ -293,15 +289,18 @@ def sync_s3_to_local(bucket_name, s3_client, assigned_user):
             for obj in page['Contents']:
                 s3_key = obj['Key']
                 
-                # Skip directory markers and assignment files
+                # Skip directory markers
                 if s3_key.endswith('/'):
-                    continue
-                if 'ibd_root/user_assignments/' in s3_key:
                     continue
                 
                 # Calculate relative path
                 relative_path = s3_key[len(s3_prefix):]
                 if not relative_path:  # Skip if empty
+                    continue
+                
+                # Skip assignment_info.txt - we already created it locally
+                if relative_path == "assignment_info.txt":
+                    print(f"  [~] Skipping assignment_info.txt (already exists locally)")
                     continue
                     
                 local_file_path = local_dir / relative_path
@@ -323,7 +322,7 @@ def sync_s3_to_local(bucket_name, s3_client, assigned_user):
                     failed_files += 1
         
         if downloaded_files == 0 and failed_files == 0:
-            print(f"[*] No files found in S3 for {assigned_user} (empty folder)")
+            print(f"[*] No case files found in S3 for {assigned_user} (new user)")
         elif failed_files > 0:
             print(f"[!] S3 sync completed with issues: {downloaded_files} succeeded, {failed_files} failed")
         else:
@@ -339,7 +338,7 @@ def sync_s3_to_local(bucket_name, s3_client, assigned_user):
         print(f"[X] Error syncing from S3: {e}")
         return local_dir, 0, 0
 
-def find_and_assign_user(bucket_name, region='us-west-2'):
+def find_and_assign_user(bucket_name, base_dir, region='us-west-2'):
     """
     Main function to find and assign user using S3 only
     Returns: assigned_user_folder or None
@@ -375,7 +374,7 @@ def find_and_assign_user(bucket_name, region='us-west-2'):
     
     if is_assigned and existing_assignment:
         print(f"[+] User already assigned: {existing_assignment}")
-        ensure_local_assignment_file(existing_assignment, current_username)
+        ensure_local_assignment_file(existing_assignment, current_username, base_dir)
         return existing_assignment
     
     # Get list of available user folders
@@ -399,7 +398,7 @@ def find_and_assign_user(bucket_name, region='us-west-2'):
     for user_folder in user_folders:
         if user_folder not in assigned_folders:
             print(f"[+] Found available folder: {user_folder}")
-            if assign_user_folder_s3(bucket_name, s3_client, current_username, user_folder):
+            if assign_user_folder_s3(bucket_name, s3_client, current_username, user_folder, base_dir):
                 assigned_user = user_folder
                 break
             else:
@@ -421,13 +420,37 @@ def main():
     BUCKET_NAME = "hoda2-ibd-sample-cases-us-west-2"
     REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
     
+    # Try ~/MyFiles/HomeFolder first (AppStream persistent - auto-syncs to S3), 
+    # then fall back to /opt/appstream (temporary - requires manual S3 sync)
+    home_dir = Path.home()
+    preferred_base = home_dir / "MyFiles" / "HomeFolder"
+    fallback_base = Path("/opt/appstream")
+    
+    # Check if preferred directory exists, otherwise use fallback
+    if preferred_base.exists():
+        base_dir = preferred_base
+        print(f"[*] Using AppStream HomeFolder: {base_dir}")
+        print(f"[*] This location auto-syncs to S3 - no manual sync needed")
+    else:
+        base_dir = fallback_base
+        print(f"[!] HomeFolder not found at {preferred_base}")
+        print(f"[*] Using fallback location: {base_dir}")
+        print(f"[*] This is temporary storage - will need manual S3 sync")
+        # Create fallback if it doesn't exist
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            print(f"[X] Cannot create {base_dir} - permission denied")
+            sys.exit(1)
+    
     current_username = get_current_username()
     print(f"[DEBUG] Detected username: '{current_username}'")
     print(f"[DEBUG] Using AWS profile: '{AWS_PROFILE}'")
+    print(f"[DEBUG] Base directory: '{base_dir}'")
     print("")
     
     try:
-        assigned_user = find_and_assign_user(BUCKET_NAME, REGION)
+        assigned_user = find_and_assign_user(BUCKET_NAME, base_dir, REGION)
         
         if assigned_user:
             print("\n" + "=" * 60)
@@ -442,7 +465,8 @@ def main():
                 print("\n" + "-" * 40)
                 print("Syncing data from S3...")
                 print("-" * 40)
-                local_dir, downloaded, failed = sync_s3_to_local(BUCKET_NAME, s3_client, assigned_user)
+                # Use base_dir parameter here!
+                local_dir, downloaded, failed = sync_s3_to_local(BUCKET_NAME, s3_client, assigned_user, base_dir)
                 
                 print("\n" + "-" * 40)
                 print("Sync Summary:")
@@ -452,9 +476,9 @@ def main():
                     print(f"  Files failed: {failed}")
                 print("-" * 40)
             
-            # Output for bash script to parse
+            # Output for bash script to parse - use base_dir
             print(f"\nASSIGNED_USER={assigned_user}")
-            print(f"USER_HOME_DIR=/home/appstream/{assigned_user}")
+            print(f"USER_HOME_DIR={base_dir}/{assigned_user}")
             
             print("\n" + "=" * 60)
             sys.exit(0)
