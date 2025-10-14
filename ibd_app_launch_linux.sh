@@ -65,9 +65,18 @@ fi
 echo ""
 # === END AWS PROFILE SETUP SECTION ===
 
-# Get the current username
-CURRENT_USER="$USER"
-echo "Current user: $CURRENT_USER"
+# Get the current AppStream user ID (unique for each user pool user)
+if [ -n "$APPSTREAM_USER_ID" ]; then
+    CURRENT_USER="$APPSTREAM_USER_ID"
+    echo "Current AppStream user: $CURRENT_USER"
+else
+    echo "[WARNING] APPSTREAM_USER_ID not found, falling back to system user"
+    CURRENT_USER="$USER"
+    echo "Current user (fallback): $CURRENT_USER"
+fi
+
+# Export it so Python can access it
+export APPSTREAM_USER_ID="$CURRENT_USER"
 
 # Verify Python executable exists and is accessible
 if ! command -v "$PYTHON_EXE" &> /dev/null; then

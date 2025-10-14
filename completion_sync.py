@@ -30,7 +30,9 @@ AWS_PROFILE = 'appstream_machine_role'
 
 def get_current_username():
     """Get the current username from various sources"""
-    username = (os.environ.get('USERNAME') or 
+    # Try AppStream user ID first (unique for each user pool user)
+    username = (os.environ.get('APPSTREAM_USER_ID') or
+               os.environ.get('USERNAME') or 
                os.environ.get('USER') or 
                os.environ.get('APPSTREAM_USER') or
                'unknown_user')
