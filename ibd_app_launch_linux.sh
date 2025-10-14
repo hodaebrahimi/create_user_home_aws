@@ -65,18 +65,44 @@ fi
 echo ""
 # === END AWS PROFILE SETUP SECTION ===
 
-# Get the current AppStream user ID (unique for each user pool user)
-if [ -n "$APPSTREAM_USER_ID" ]; then
+# === GET APPSTREAM USERNAME (FIXED) ===
+# Priority order for unique user identification:
+# 1. APPSTREAM_USER_NAME - actual user pool username (e.g., "hoda", "john")
+# 2. APPSTREAM_SAML_SUBJECT_NAME_ID - parse from SAML email
+# 3. APPSTREAM_USER_ID - unique user ID (fallback)
+# 4. System $USER - NOT RECOMMENDED (same for all users)
+
+if [ -n "$APPSTREAM_USER_NAME" ]; then
+    CURRENT_USER="$APPSTREAM_USER_NAME"
+    echo "✓ Using AppStream user pool username: $CURRENT_USER"
+elif [ -n "$APPSTREAM_SAML_SUBJECT_NAME_ID" ]; then
+    # Extract username from email format (e.g., "hoda@domain.com" → "hoda")
+    CURRENT_USER=$(echo "$APPSTREAM_SAML_SUBJECT_NAME_ID" | cut -d'@' -f1)
+    echo "✓ Parsed username from SAML: $CURRENT_USER"
+elif [ -n "$APPSTREAM_USER_ID" ]; then
     CURRENT_USER="$APPSTREAM_USER_ID"
-    echo "Current AppStream user: $CURRENT_USER"
+    echo "⚠ Using AppStream User ID: $CURRENT_USER"
 else
-    echo "[WARNING] APPSTREAM_USER_ID not found, falling back to system user"
+    echo "⚠ WARNING: No AppStream username found, falling back to system user"
     CURRENT_USER="$USER"
-    echo "Current user (fallback): $CURRENT_USER"
+    echo "⚠ System user (NOT unique): $CURRENT_USER"
+    echo "⚠ This may cause assignment conflicts in multi-user environments!"
 fi
 
-# Export it so Python can access it
+# Export for Python to access
+export APPSTREAM_USER_NAME="$CURRENT_USER"
 export APPSTREAM_USER_ID="$CURRENT_USER"
+
+# Debug output
+echo ""
+echo "User Identification Debug:"
+echo "  APPSTREAM_USER_NAME: ${APPSTREAM_USER_NAME:-NOT SET}"
+echo "  APPSTREAM_USER_ID: ${APPSTREAM_USER_ID:-NOT SET}"
+echo "  APPSTREAM_SAML_SUBJECT_NAME_ID: ${APPSTREAM_SAML_SUBJECT_NAME_ID:-NOT SET}"
+echo "  System USER: $USER"
+echo "  Selected CURRENT_USER: $CURRENT_USER"
+echo ""
+# === END USERNAME DETECTION ===
 
 # Verify Python executable exists and is accessible
 if ! command -v "$PYTHON_EXE" &> /dev/null; then
@@ -216,7 +242,8 @@ export USER_HOME_DIR="$USER_HOME"
 
 echo ""
 echo "============================================"
-echo "Assigned user: $ASSIGNED_USER"
+echo "Assigned user folder: $ASSIGNED_USER"
+echo "Actual user: $CURRENT_USER"
 echo "User home directory: $USER_HOME"
 echo "Environment variable USER_HOME_DIR set to: $USER_HOME_DIR"
 

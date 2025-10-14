@@ -18,13 +18,38 @@ from botocore.exceptions import ClientError, NoCredentialsError
 AWS_PROFILE = 'appstream_machine_role'
 
 def get_current_username():
-    """Get the current username from various sources"""
-    # Try AppStream user ID first (unique for each user pool user)
-    username = (os.environ.get('APPSTREAM_USER_ID') or
-               os.environ.get('USERNAME') or 
-               os.environ.get('USER') or 
-               os.environ.get('APPSTREAM_USER') or
-               'unknown_user')
+    """
+    Get the current username from AppStream environment
+    Priority order:
+    1. APPSTREAM_USER_NAME - actual user pool username (e.g., "hoda", "john")
+    2. APPSTREAM_SAML_SUBJECT_NAME_ID - parsed from SAML (email format)
+    3. APPSTREAM_USER_ID - unique user ID (fallback)
+    4. System username (last resort)
+    """
+    # Try APPSTREAM_USER_NAME first (the actual user pool username)
+    username = os.environ.get('APPSTREAM_USER_NAME')
+    
+    if username:
+        print(f"[DEBUG] Found APPSTREAM_USER_NAME: {username}")
+        return username.lower()
+    
+    # Try parsing from SAML attributes
+    saml_subject = os.environ.get('APPSTREAM_SAML_SUBJECT_NAME_ID')
+    if saml_subject:
+        username = saml_subject.split('@')[0]
+        print(f"[DEBUG] Parsed from SAML: {username}")
+        return username.lower()
+    
+    # Fallback to APPSTREAM_USER_ID
+    username = os.environ.get('APPSTREAM_USER_ID')
+    if username:
+        print(f"[DEBUG] Using APPSTREAM_USER_ID: {username}")
+        return username.lower()
+    
+    # Last resort
+    username = os.environ.get('USER', 'unknown_user')
+    print(f"[WARNING] Fallback to system user: {username}")
+    print(f"[WARNING] This may cause assignment conflicts!")
     return username.lower()
 
 def initialize_s3_client(bucket_name, region='us-west-2'):
@@ -446,6 +471,13 @@ def main():
             sys.exit(1)
     
     current_username = get_current_username()
+
+    print(f"[DEBUG] Environment Variables:")
+    print(f"[DEBUG]   APPSTREAM_USER_NAME: {os.environ.get('APPSTREAM_USER_NAME', 'NOT SET')}")
+    print(f"[DEBUG]   APPSTREAM_USER_ID: {os.environ.get('APPSTREAM_USER_ID', 'NOT SET')}")
+    print(f"[DEBUG]   APPSTREAM_SAML_SUBJECT_NAME_ID: {os.environ.get('APPSTREAM_SAML_SUBJECT_NAME_ID', 'NOT SET')}")
+    print(f"[DEBUG]   USER (system): {os.environ.get('USER', 'NOT SET')}")
+
     print(f"[DEBUG] Detected username: '{current_username}'")
     print(f"[DEBUG] Using AWS profile: '{AWS_PROFILE}'")
     print(f"[DEBUG] Base directory: '{base_dir}'")

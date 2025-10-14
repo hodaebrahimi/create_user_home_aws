@@ -29,12 +29,30 @@ import fnmatch
 AWS_PROFILE = 'appstream_machine_role'
 
 def get_current_username():
-    """Get the current username from various sources"""
-    # Try AppStream user ID first (unique for each user pool user)
-    username = (os.environ.get('APPSTREAM_USER_ID') or
-               os.environ.get('USERNAME') or 
+    """
+    Get the current username from AppStream environment
+    Priority order:
+    1. APPSTREAM_USER_NAME - actual user pool username (e.g., "hoda", "john")
+    2. APPSTREAM_SAML_SUBJECT_NAME_ID - parsed from SAML (email format)
+    3. APPSTREAM_USER_ID - unique user ID (fallback)
+    4. System username (last resort)
+    """
+    username = os.environ.get('APPSTREAM_USER_NAME')
+    
+    if username:
+        return username.lower()
+    
+    saml_subject = os.environ.get('APPSTREAM_SAML_SUBJECT_NAME_ID')
+    if saml_subject:
+        username = saml_subject.split('@')[0]
+        return username.lower()
+    
+    username = os.environ.get('APPSTREAM_USER_ID')
+    if username:
+        return username.lower()
+    
+    username = (os.environ.get('USERNAME') or 
                os.environ.get('USER') or 
-               os.environ.get('APPSTREAM_USER') or
                'unknown_user')
     return username.lower()
 
@@ -255,18 +273,27 @@ def sync_case_to_persistent_storage(persistent_path, assigned_user, case_dir):
         print(f"  [X] Error syncing case {case_name} to persistent storage: {e}")
         return False
 
-def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
-    """Sync completion artifacts for a specific case to S3 under ibd_root/"""
+def sync_case_to_s3(s3_client, bucket_name, user_folder, case_dir, actual_username):
+    """
+    Sync completion artifacts for a specific case to S3 under ibd_root/
+    
+    Args:
+        s3_client: boto3 S3 client
+        bucket_name: S3 bucket name
+        user_folder: folder name (e.g., "user1", "user2")
+        case_dir: Path to case directory
+        actual_username: actual user pool username for metadata
+    """
     case_name = case_dir.name
     # Sync to ibd_root/{user}/{case}/ structure
-    s3_case_prefix = f"ibd_root/{assigned_user}/{case_name}/"
+    s3_case_prefix = f"ibd_root/{user_folder}/{case_name}/"
     
     uploaded_files = 0
     
     try:
-        print(f"  [*] Syncing to S3 (ibd_root/{assigned_user}/) for case: {case_name}")
+        print(f"  [*] Syncing to S3 (ibd_root/{user_folder}/) for case: {case_name}")
         
-        files_to_upload = get_completion_files_to_sync(case_dir, assigned_user)
+        files_to_upload = get_completion_files_to_sync(case_dir, user_folder)
         
         # Upload filtered files
         for local_file_path in files_to_upload:
@@ -276,10 +303,11 @@ def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
             try:
                 # Add metadata to track upload
                 metadata = {
-                    'uploaded_by': assigned_user,
+                    'uploaded_by': actual_username,  # Changed from assigned_user
                     'upload_timestamp': datetime.now().isoformat(),
                     'case_name': case_name,
-                    'sync_type': 'completion_artifacts'
+                    'sync_type': 'completion_artifacts',
+                    'user_folder': user_folder  # Add this line
                 }
                 
                 s3_client.upload_file(
@@ -304,7 +332,7 @@ def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
         if uploaded_files > 0:
             timestamp_key = s3_case_prefix + "completion_sync_timestamp.txt"
             timestamp_content = (
-                f"Case {case_name} completion artifacts synced by {assigned_user}\n"
+                f"Case {case_name} completion artifacts synced by {actual_username}\n"
                 f"Timestamp: {datetime.now().isoformat()}\n"
                 f"Files synced: {uploaded_files}\n"
                 f"S3 location: s3://{bucket_name}/{s3_case_prefix}"
@@ -317,7 +345,7 @@ def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
                     Body=timestamp_content,
                     ContentType='text/plain',
                     Metadata={
-                        'completed_by': assigned_user,
+                        'completed_by': actual_username,
                         'sync_timestamp': datetime.now().isoformat(),
                         'files_synced': str(uploaded_files)
                     }
@@ -333,18 +361,26 @@ def sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
         print(f"  [X] Error syncing case {case_name} to S3: {e}")
         return False
 
-def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
+def sync_completed_cases(bucket_name, actual_username, user_home_dir):
     """Main function to sync all completed cases"""
     base_dir = detect_base_directory(user_home_dir)
+    
+    # ✅ ADD THIS - Get user folder from assignment_info.txt
+    assigned_username, user_folder = get_assigned_user_from_folder(user_home_dir)
+    
+    if not user_folder:
+        print("[X] Could not determine user folder from assignment_info.txt")
+        return False
     
     print("=" * 60)
     print("   IBD CASE COMPLETION SYNC")
     print("=" * 60)
-    print(f"User: {assigned_user}")
+    print(f"Actual User: {actual_username}") 
+    print(f"User Folder: {user_folder}")     
     print(f"Home Directory: {user_home_dir}")
     print(f"Base Directory: {base_dir}")
     print(f"S3 Bucket: {bucket_name}")
-    print(f"S3 Path: ibd_root/{assigned_user}/")
+    print(f"S3 Path: ibd_root/{user_folder}/")
     print(f"AWS Profile: {AWS_PROFILE}")
     print("")
     
@@ -425,9 +461,9 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
         # Sync the case to S3
         print(f"  [*] Syncing case {synced_cases + 1}/{total_cases}: {case_name}")
         
-        if sync_case_to_s3(s3_client, bucket_name, assigned_user, case_dir):
+        if sync_case_to_s3(s3_client, bucket_name, user_folder, case_dir, actual_username):
             s3_sync_flag.write_text(
-                f"Synced to S3 (ibd_root/{assigned_user}/) at {datetime.now().isoformat()}"
+                f"Synced to S3 (ibd_root/{user_folder}/) at {datetime.now().isoformat()}"
             )
             sync_tracking[case_name] = {
                 'last_synced_timestamp': datetime.now().timestamp(),
@@ -457,7 +493,7 @@ def sync_completed_cases(bucket_name, assigned_user, user_home_dir):
     print("=" * 60)
     print(f"SYNC COMPLETED: {synced_cases}/{total_cases} cases synced to S3")
     print(f"Base Directory: {base_dir} (temporary)")
-    print(f"S3 Path: s3://{bucket_name}/ibd_root/{assigned_user}/")
+    print(f"S3 Path: s3://{bucket_name}/ibd_root/{user_folder}/")
     print(f"AWS Profile: {AWS_PROFILE}")
     print("=" * 60)
     
@@ -488,6 +524,10 @@ def main():
     
     print(f"[*] User home directory: {user_home_dir}")
     print(f"[*] AWS Profile: {AWS_PROFILE}")
+
+    # Get the actual current username
+    actual_username = get_current_username()
+    print(f"[*] Current user: {actual_username}")
     
     # Read the assigned username from the local assignment file
     assigned_username, user_folder = get_assigned_user_from_folder(user_home_dir)
@@ -499,11 +539,12 @@ def main():
         print("    Line 1: user folder name (e.g., user1)")
         print("    Line 2: username (e.g., hoda)")
         sys.exit(1)
-    
-    print(f"[+] Syncing for user: {assigned_username} (folder: {user_folder})")
+
+    print(f"[+] Syncing for user: {actual_username}")
+    print(f"[+] User folder: {user_folder}")
     
     try:
-        success = sync_completed_cases(bucket_name, user_folder, user_home_dir)
+        success = sync_completed_cases(bucket_name, actual_username, user_home_dir)
         if success:
             print("[+] Completion sync finished successfully")
             sys.exit(0)
