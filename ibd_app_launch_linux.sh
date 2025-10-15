@@ -3,10 +3,26 @@
 # Exit on error (but we'll handle errors explicitly where needed)
 set -e
 
+# === SOURCE APPSTREAM USER VARS - ADD THIS SECTION ===
+# This provides the actual unique username via $AppStream_UserName
+if [ -f /etc/profile.d/appstream_user_vars.sh ]; then
+    echo "Sourcing AppStream user variables..."
+    source /etc/profile.d/appstream_user_vars.sh
+    if [ -n "$AppStream_UserName" ]; then
+        echo "✓ AppStream_UserName available: $AppStream_UserName"
+    else
+        echo "⚠ WARNING: AppStream user vars sourced but AppStream_UserName is empty"
+    fi
+else
+    echo "⚠ WARNING: /etc/profile.d/appstream_user_vars.sh not found"
+fi
+# === END APPSTREAM USER VARS SECTION ===
+
 # === DEBUG SECTION ===
 DEBUG_LOG="$HOME/appstream_debug.log"
 echo "DEBUG: Script execution started at $(date)" > "$DEBUG_LOG"
 echo "DEBUG: Current user: $USER" >> "$DEBUG_LOG"
+echo "DEBUG: AppStream_UserName: ${AppStream_UserName:-NOT SET}" >> "$DEBUG_LOG"
 echo "DEBUG: Current directory: $(pwd)" >> "$DEBUG_LOG"
 echo "DEBUG: Testing Python path..." >> "$DEBUG_LOG"
 python3 --version >> "$DEBUG_LOG" 2>&1
@@ -65,14 +81,18 @@ fi
 echo ""
 # === END AWS PROFILE SETUP SECTION ===
 
-# === GET APPSTREAM USERNAME (FIXED) ===
+# === GET APPSTREAM USERNAME (UPDATED TO USE AppStream_UserName) ===
 # Priority order for unique user identification:
-# 1. APPSTREAM_USER_NAME - actual user pool username (e.g., "hoda", "john")
-# 2. APPSTREAM_SAML_SUBJECT_NAME_ID - parse from SAML email
-# 3. APPSTREAM_USER_ID - unique user ID (fallback)
-# 4. System $USER - NOT RECOMMENDED (same for all users)
+# 1. AppStream_UserName - from /etc/profile.d/appstream_user_vars.sh (BEST)
+# 2. APPSTREAM_USER_NAME - actual user pool username (e.g., "hoda", "john")
+# 3. APPSTREAM_SAML_SUBJECT_NAME_ID - parse from SAML email
+# 4. APPSTREAM_USER_ID - unique user ID (fallback)
+# 5. System $USER - NOT RECOMMENDED (same for all users)
 
-if [ -n "$APPSTREAM_USER_NAME" ]; then
+if [ -n "$AppStream_UserName" ]; then
+    CURRENT_USER="$AppStream_UserName"
+    echo "✓ Using AppStream_UserName from profile script: $CURRENT_USER"
+elif [ -n "$APPSTREAM_USER_NAME" ]; then
     CURRENT_USER="$APPSTREAM_USER_NAME"
     echo "✓ Using AppStream user pool username: $CURRENT_USER"
 elif [ -n "$APPSTREAM_SAML_SUBJECT_NAME_ID" ]; then
@@ -96,6 +116,7 @@ export APPSTREAM_USER_ID="$CURRENT_USER"
 # Debug output
 echo ""
 echo "User Identification Debug:"
+echo "  AppStream_UserName (from script): ${AppStream_UserName:-NOT SET}"
 echo "  APPSTREAM_USER_NAME: ${APPSTREAM_USER_NAME:-NOT SET}"
 echo "  APPSTREAM_USER_ID: ${APPSTREAM_USER_ID:-NOT SET}"
 echo "  APPSTREAM_SAML_SUBJECT_NAME_ID: ${APPSTREAM_SAML_SUBJECT_NAME_ID:-NOT SET}"
@@ -219,6 +240,8 @@ ASSIGNED_USER=$(grep "^ASSIGNED_USER=" "$TEMP_OUTPUT" | cut -d'=' -f2)
 rm -f "$TEMP_OUTPUT"
 
 # Debug output
+echo ""
+echo "============================================================"
 echo "DEBUG: Extracted ASSIGNED_USER as: \"$ASSIGNED_USER\""
 
 # Verify we got a valid user assignment
